@@ -32,6 +32,10 @@ NULL
 #'  enriched pathways
 #' @param n_pathway_show Number of pathways to return in final
 #'  result
+#' @param expr_data Pre-processed gene expression data frame
+#' @param sample_info Experiment design structure as a data frame
+#' @param data_type Data type selected as integers; Fold Change = 1, 
+#' Expression = 2
 #'
 #' @export
 #' @return A data frame with the results of the pathway analysis.
@@ -40,7 +44,10 @@ NULL
 #'  number of overlapping genes, and the p-value.
 #'
 #' @family pathway functions
-gage_data <- function(select_go,
+gage_data <- function(expr_data,
+                      sample_info = NULL,
+                      data_type,
+                      select_go,
                       select_contrast,
                       min_set_size,
                       max_set_size,
@@ -61,7 +68,7 @@ gage_data <- function(select_go,
   if (length(limma$top_genes) == 0) {
     return(no_sig)
   }
-
+  
   if (length(limma$comparisons) == 1) {
     top_1 <- limma$top_genes[[1]]
   } else {
@@ -77,19 +84,52 @@ gage_data <- function(select_go,
   }
   colnames(top_1) <- c("Fold", "FDR")
 
+  expr_data <- expr_data[rownames(top_1),]
+  expr_data <- expr_data[which(top_1$FDR < gene_p_val_cutoff), ]
   top_1 <- top_1[which(top_1$FDR < gene_p_val_cutoff), ]
 
   gmt <- gene_sets
   if (length(gene_sets) == 0) {
     return(as.data.frame("No gene set found!"))
   }
-
-  fold <- top_1[, 1]
-  names(fold) <- rownames(top_1)
-  if (absolute_fold) {
-    fold <- abs(fold)
+  
+  groups <- unlist(
+    stringr::str_split(string = select_contrast, 
+                       pattern = "-")
+  )
+  
+  # Conditional statements for determining GAGE data
+  # Expression data selected with experiment design/sample info
+  if(!is.null(sample_info) && data_type == 2) {
+    sample_info <- t(sample_info)
+    
+    samples <- sapply(groups, function(x){
+      colnames(sample_info)[colSums(sample_info == x) > 0]
+    })
+    
+    samples <- as.vector(samples)
+    data <- expr_data[, samples]
+    # Fold change selected
+  } else if (data_type == 1){
+    fold <- top_1[, 1]
+    names(fold) <- rownames(top_1)
+    if (absolute_fold) {
+      fold <- abs(fold)
+    } 
+    data <- fold
+    # Expression data selected without experiment design
+  } else {
+    col_groups <- detect_groups(colnames(expr_data))
+    
+    cols <- sapply(groups, function(x){
+      which(col_groups == x)
+    })
+    cols <- sort(as.vector(cols))
+    
+    data <- expr_data[, cols]
   }
-  paths <- gage::gage(fold, gsets = gmt, ref = NULL, samp = NULL)
+  
+  paths <- gage::gage(data, gsets = gmt, ref = NULL, samp = NULL)
 
   paths <- rbind(paths$greater, paths$less)
 
@@ -175,7 +215,7 @@ pgsea_data <- function(processed_data,
   if (length(subtype) < 4 || length(unique(subtype)) < 2 ||
     length(unique(subtype)) == dim(processed_data)[2]) {
     pg_results <- pg_results[order(-apply(pg_results, 1, sd)), ]
-    return(list(pg_data = pg_results[1:top, ], best <- best))
+    return(list(pg_data = pg_results[1:n_pathway_show, ], best <- best))
   }
 
   cat("\nComputing P values using ANOVA\n")
@@ -395,8 +435,6 @@ plot_gsva <- function(my_range,
         result$pg_data <- result$pg_data - rowMeans(result$pg_data)        
       }
 
-
-
       PGSEA::smcPlot(
         result$pg_data,
         factor(subtype),
@@ -445,8 +483,25 @@ gsva_data <- function(processed_data,
   if (length(gene_sets) == 0) {
     return(list(pg3 = NULL, best = 1))
   }
-
-  pg_results <- GSVA::gsva(processed_data, gene_sets, verbose = FALSE, method = algorithm)
+  
+  # # Modern Syntax for current GSVA versions
+  # if (algorithm == "gsva"){
+  # 
+  #   param <- GSVA::gsvaParam(processed_data, gene_sets)
+  # 
+  # } else if (algorithm == "ssgsea") {
+  # 
+  #   param <- GSVA::ssgseaParam(processed_data, gene_sets)
+  # 
+  # } else if (algorithm == "plage") {
+  # 
+  #   param <- GSVA::plageParam(processed_data, gene_sets)
+  # }
+  # 
+  # pg_results <- GSVA::gsva(param = param, verbose = FALSE)
+  # 
+ # Deprecated syntax for old versions
+ pg_results <- GSVA::gsva(processed_data, gene_sets, verbose = FALSE, method = algorithm)
 
   # Remove se/wrts with all missing(non-signficant)
   pg_results <- pg_results[rowSums(is.na(pg_results)) < ncol(pg_results), ]
@@ -678,7 +733,6 @@ fgsea_data <- function(select_contrast,
     return(as.data.frame("No gene set found!"))
   }
 
-
   fold <- top_1[, 1]
   names(fold) <- rownames(top_1)
 
@@ -771,6 +825,7 @@ reactome_data <- function(select_contrast,
                           pathway_p_val_cutoff,
                           n_pathway_show,
                           absolute_fold) {
+  
   ensembl_species <- c(
     "hsapiens_gene_ensembl", "rnorvegicus_gene_ensembl", "mmusculus_gene_ensembl",
     "celegans_gene_ensembl", "scerevisiae_gene_ensembl", "drerio_gene_ensembl",
@@ -819,8 +874,9 @@ reactome_data <- function(select_contrast,
     org_info = idep_data$org_info,
     idep_data = idep_data
   )
-
-
+  # Remove duplicate gene entrez IDs
+  fold <- fold[!duplicated(names(fold))]
+  
   fold <- sort(fold, decreasing = T)
   paths <- ReactomePA::gsePathway(
     fold,
@@ -978,9 +1034,8 @@ pgsea_plot_all <- function(go,
 #' @param my_range Vector of the (min_set_size, max_set_size)
 #' @param data Matrix of gene data that has been through
 #'  \code{\link{pre_process}()}
-#' @param select_contrast String designating the comparison from DEG analysis to
-#'  filter for the significant genes. See the 'comparison' element from the list
-#'  returned from \code{\link{limma_value}()} for options.
+#' @param contrast_samples Sample columns that correspond to the
+#'  selected comparison
 #' @param gene_sets List of vectors with each vector being the
 #'  set of genes that correspond to a particular pathway in
 #'  the database. See list returned from \code{\link{read_gene_sets}()}
@@ -1003,46 +1058,14 @@ pgsea_plot_all <- function(go,
 #' @family pathway functions
 get_pgsea_plot_data <- function(my_range,
                                 data,
-                                select_contrast,
+                                contrast_samples,
                                 gene_sets,
                                 sample_info,
                                 select_factors_model,
                                 select_model_comprions,
                                 pathway_p_val_cutoff,
                                 n_pathway_show) {
-  # Find sample related to the comparison
-  iz <- match(detect_groups(colnames(data)), unlist(strsplit(select_contrast, "-")))
-  iz <- which(!is.na(iz))
-
-  if (!is.null(sample_info) & !is.null(select_factors_model) & length(select_model_comprions) > 0) {
-    # Strings like: "groups: mutant vs. control"
-    comparisons <- gsub(".*: ", "", select_model_comprions)
-    comparisons <- gsub(" vs\\. ", "-", comparisons)
-    # Corresponding factors
-    factors_vector <- gsub(":.*", "", select_model_comprions)
-    # Selected contrast lookes like: "mutant-control"
-    ik <- match(select_contrast, comparisons)
-    if (is.na(ik)) {
-      iz <- 1:(dim(data)[2])
-    } else {
-      # Interaction term, use all samples
-      # Corresponding factors
-      selected_factor <- factors_vector[ik]
-      iz <- match(sample_info[, selected_factor], unlist(strsplit(select_contrast, "-")))
-      iz <- which(!is.na(iz))
-    }
-  }
-
-  if (grepl("I:", select_contrast)) {
-    # If it is factor design use all samples
-    iz <- 1:(dim(data)[2])
-  }
-  if (is.na(iz)[1] | length(iz) <= 1) {
-    iz <- 1:(dim(data)[2])
-  }
-
-  genes <- data
-  genes <- genes[, iz]
+  genes <- data[, contrast_samples]
 
   subtype <- detect_groups(colnames(genes))
 
@@ -1119,6 +1142,115 @@ get_pgsea_plot_all_samples_data <- function(data,
   }
 }
 
+#' Transform Pathway Data
+#' 
+#' Transform data from various pathway methods for uniform download format
+#'
+#' @param data Pathway data from selected method
+#' @param contrast Selected contrast from DEG1 tab
+#' @param method  Selected pathway method
+#' @param genes Gene data
+#' @param org  Selected org from pre-process step
+#' @param path_id Show pathway ID toggle
+#' @param go Selected pathway database
+#' @param deg Up/Down-regulation results from DEG1
+#'
+#' @return Data frame with hyperlinks and urls for pathways
+#' 
+#' @export
+#'          
+pathway_data_transform <- function(data, 
+                                   contrast,
+                                   method,
+                                   genes,
+                                   org,
+                                   path_id,
+                                   go,
+                                   deg){
+  
+  if (data[1,1] == "No significant pathway found."){
+    return(data)
+  }
+  
+  if (method %in% c("PGSEA", "GSVA", "ssGSEA", "PLAGE")){
+    rn <- rownames(data)
+    
+    data <- data.frame(
+      adj.Pval = sub("^([0-9.eE+-]+)\\s+.*", "\\1", rn),
+      pathway = sub("^[0-9.eE+-]+\\s+", "", rn),
+      data,
+      row.names = NULL,
+      check.names = FALSE
+    )
+  }
+  
+  if(method == "ssGSEA") {
+    data[,-c(1:3)] <- data[, -c(1:3)] - rowMeans(data[, -c(1:3)])        
+  }
+  
+  # Name for hypertext column
+  hypertext_name <- paste0(method," Analysis: ", contrast)
+  # Rename 2nd column
+  colnames(data)[2] <- paste(hypertext_name, "Pathways")
+  
+  if (ncol(data) > 1) {
+    # add URL
+    ix <- match(data[, 2], genes$pathway_info$description)
+    
+    paths <- genes$gene_lists[which(names(genes$gene_lists) %in% data[,2])]
+    # Find gene matches in top pathways
+    path_match <- lapply(rownames(deg), function(x) {
+      groups <- names(paths)[sapply(paths, function(vec) x %in% vec)]
+      if (length(groups) > 0) {
+        data.frame(Gene = x, group = groups, stringsAsFactors = FALSE)
+      } else {
+        NULL  # skip this element if no groups matched
+      }
+    })
+    
+    # Combine into one data frame
+    result_df <- do.call(rbind, path_match)
+    deg$Gene <- rownames(deg)
+    counts <- merge(x = result_df, y = deg, by = "Gene", all.x = TRUE)
+    colnames(counts)[3] <- "Expr"
+    # Find Up/Down Gene count
+    counts <- dplyr::group_by(counts, group) |>
+      dplyr::summarize(UpGenes = sum(Expr == 1, na.rm = TRUE),
+                       DownGenes = sum(Expr == -1, na.rm = TRUE),
+                       UnregGenes = sum(Expr == 0, na.rm = TRUE))
+    
+    data2 <- merge(x = data, y = counts, by.x = colnames(data)[2], by.y = "group")
+    # sort by adj.Pval
+    data2 <- data2[match(data[,2], data2[,1]), ]
+    
+    # remove pathway ID, but only in Ensembl species
+    if (!path_id && org > 0) {
+      data2[, 1] <- remove_pathway_id(data2[, 1], go)
+    }
+    
+    # Add hypertext to the end of the data
+    data2[hypertext_name] <- hyperText(
+      data2[, 1],
+      genes$pathway_info$memo[ix]
+    )
+    
+    # create separate URL column for download
+    data2 <- data.frame(data2[,c(2,1)],
+                        URL = genes$pathway_info$memo[ix],
+                        data2[,-c(1,2)],
+                        check.names = FALSE
+    )
+    
+    if (method %in% c("GSEA", "GAGE")){
+      data2[, 7:9] <- lapply(data2[, 7:9], as.character)
+    }
+    
+  }
+  
+  return(data2)
+  
+}
+
 #' Get data from genes in selected pathway
 #'
 #' Return a data matrix that is a subset of the processed data and
@@ -1138,6 +1270,8 @@ get_pgsea_plot_all_samples_data <- function(data,
 #' @param select_org String designating the organism being analyzed
 #' @param all_gene_names Matrix of all the matched and converted
 #'  gene IDs from \code{\link{get_all_gene_names}()}
+#' @param deg data frame of DEG1 gene regulation results - i.e.-1, 0 , 1 for
+#' every gene
 #'
 #' @export
 #' @return Sub-data matrix from the processed data. Only contains
@@ -1150,10 +1284,12 @@ pathway_select_data <- function(sig_pathways,
                                 contrast_samples,
                                 data,
                                 select_org,
-                                all_gene_names) {
+                                all_gene_names,
+                                deg) {
   if (sig_pathways == "All") {
     return(NULL)
   }
+  
   # Find the gene set
   ix <- which(names(gene_sets) == sig_pathways)
   if (length(ix) == 0) {
@@ -1165,7 +1301,63 @@ pathway_select_data <- function(sig_pathways,
   # Find related samples
   iz <- contrast_samples
   x <- data[which(rownames(data) %in% genes), iz]
+  x <- merge(x = x, y = deg, by = "row.names")
+  rownames(x) <- x$Row.names
+  x <- dplyr::select(x,-1)
+  x[,ncol(x)] <- dplyr::case_when(x[,ncol(x)] == 1 ~ "Up", 
+                                  x[,ncol(x)] == -1 ~ "Down", 
+                                  TRUE ~ "None")
+  
   return(x)
+}
+
+#' Find list of genes in Reactome Pathway
+#'
+#' @param sig_pathway Pathway selection
+#' @param data ReactomePA pathway dataset
+#' @param gene_info Gene dataset
+#' @param converted pre_process converted data
+#'
+#' @returns data frame of genes from the selected pathway
+#' @export
+#'
+reactome_gene_list <- function(sig_pathway,
+                               data,
+                               gene_info,
+                               converted){
+  
+  ensembl_species <- c(
+    "hsapiens_gene_ensembl", "rnorvegicus_gene_ensembl", 
+    "mmusculus_gene_ensembl", "celegans_gene_ensembl", 
+    "scerevisiae_gene_ensembl", "drerio_gene_ensembl",
+    "dmelanogaster_gene_ensembl"
+  )
+  reactome_pa_species <- c("human", "rat", "mouse", 
+                           "celegans", "yeast", "zebrafish", 
+                           "fly")
+  # Find species of data
+  species <- converted$species[1, 1]
+  #Match to ensembl ID
+  ix <- match(species, ensembl_species)
+  
+  # Find genes in pathway selected
+  gene_search <- ReactomePA::viewPathway(sig_pathway,
+                                         organism = reactome_pa_species[ix],
+                                         keyType = "ENSEMBLID")
+  gene_search <- as.vector(gene_search$data$name)
+  
+  # Match genes by symbol
+  symbolID <- gene_info[, c("ensembl_gene_id", "symbol")]
+  symbolID$symbol <- gsub(" ", "", symbolID$symbol)
+  ix <- match(gene_search, symbolID$symbol)
+  
+  genes <- symbolID[ix, 1]
+  
+  # search for genes in submitted data
+  x <- data[which(rownames(data) %in% genes),]
+  
+  return(x)
+  
 }
 
 #' Create pathway table with gene sets

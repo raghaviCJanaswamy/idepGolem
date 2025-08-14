@@ -220,6 +220,8 @@ process_heatmap_data <- function(data,
 #' @param k_clusters Number of clusters to use for k-means
 #' @param re_run Integer for a seed to Re-run k-means with
 #' @param selected_genes Character list of genes to label on the heatmap
+#' @param group_pal Named list of colors and their corresponding categories
+#' @param sample_color Selected colorspace color palette
 #'
 #' @export
 #' @return Heatmap of the processed data.
@@ -243,13 +245,15 @@ heatmap_main <- function(data,
                          row_dend,
                          k_clusters,
                          re_run,
-                         selected_genes) {
+                         selected_genes,
+                         group_pal = NULL,
+                         sample_color = NULL) {
   # Filter with max z-score
   cutoff <- median(unlist(data)) + heatmap_cutoff * sd(unlist(data))
   data[data > cutoff] <- cutoff
   cutoff <- median(unlist(data)) - heatmap_cutoff * sd(unlist(data))
   data[data < cutoff] <- cutoff
-
+  
   # Color scale
   if (min(data) < 0) {
     col_fun <- circlize::colorRamp2(
@@ -262,38 +266,40 @@ heatmap_main <- function(data,
       heatmap_color_select
     )
   }
-
   groups <- detect_groups(colnames(data))
   heat_ann <- NULL
   if (!is.null(select_factors_heatmap)) {
     if (select_factors_heatmap != "All factors") { # one factor-------
+      show_legend <- TRUE
       # Annotation for groups
       if (!is.null(sample_info) && !is.null(select_factors_heatmap)) {
         if (select_factors_heatmap == "Names") {
           groups <- detect_groups(colnames(data))
+          show_legend <- FALSE
         } else {
           ix <- match(select_factors_heatmap, colnames(sample_info))
           groups <- sample_info[, ix]
         }
       }
-      groups_colors <- gg_color_hue(length(unique(groups)))
+      groups_colors <- colorspace::qualitative_hcl(length(unique(groups)), 
+                                                   palette = sample_color,
+                                                   c = 70)
       heat_ann <- ComplexHeatmap::HeatmapAnnotation(
         Group = groups,
         col = list(Group = setNames(groups_colors, unique(groups))),
-        annotation_legend_param = list(
-          Group = list(nrow = 1, title = NULL)
-        ),
         show_annotation_name = list(Group = FALSE),
-        show_legend = FALSE
+        show_legend = show_legend
       )
     } else { # more factors------------------------
+      
       heat_ann <- ComplexHeatmap::HeatmapAnnotation(
         df = sample_info,
+        col = group_pal,
         show_legend = TRUE
       )
     }
   }
-
+  
   # Different heatmaps for hierarchical and k-means
   if (cluster_meth == 1) {
     heat <- ComplexHeatmap::Heatmap(
@@ -331,7 +337,6 @@ heatmap_main <- function(data,
     } else {
       row_title <- 10
     }
-
     heat <- ComplexHeatmap::Heatmap(
       data,
       name = "Expression",
@@ -359,6 +364,21 @@ heatmap_main <- function(data,
 
   # mark selected genes on heatmap
   if (!is.null(selected_genes)) {
+    
+    if ("Top 5" %in% selected_genes){
+      selected_genes <- c(rownames(data)[1:5], 
+                          selected_genes[which(selected_genes != "Top 5")])
+    } 
+    if ("Top 10" %in% selected_genes){
+      selected_genes <- c(rownames(data)[1:10], 
+                          selected_genes[which(selected_genes != "Top 10")])
+    } 
+    if ("Top 15" %in% selected_genes){
+      selected_genes <- c(rownames(data)[1:15], 
+                          selected_genes[which(selected_genes != "Top 15")])
+    }
+    
+    selected_genes <- unique(selected_genes)
     ids <- row.names(heat@matrix)[heat@row_order]
     ix <- which(ids %in% selected_genes)
     req(length(ix) > 0)
@@ -516,6 +536,8 @@ k_means_elbow <- function(heatmap_data) {
 #' @param sample_info Matrix of experiment design information from load data
 #' @param select_factors_heatmap Factor to group by in the samples.
 #'   "All factors" will use all of the sample information.
+#' @param group_pal Named list of colors and their corresponding categories
+#' @param sample_color Selected colorspace color palette
 #'
 #' @export
 #' @return A list containing a ComplexHeatmap annotation object,
@@ -525,42 +547,54 @@ k_means_elbow <- function(heatmap_data) {
 #' @family heatmaps
 sub_heat_ann <- function(data,
                          sample_info,
-                         select_factors_heatmap) {
-  if (select_factors_heatmap == "All factors") {
-    select_factors_heatmap <- colnames(sample_info)[1]
-  }
-
+                         select_factors_heatmap,
+                         group_pal = NULL,
+                         sample_color = NULL) {
   groups <- detect_groups(colnames(data))
-
-  if (!is.null(sample_info) && !is.null(select_factors_heatmap)) {
-    if (select_factors_heatmap == "Names") {
-      groups <- detect_groups(colnames(data))
-    } else {
-      ix <- match(select_factors_heatmap, colnames(sample_info))
-      groups <- sample_info[, ix]
+  
+  if (select_factors_heatmap == "All factors") {
+    
+    group_colors <- group_pal
+    
+    heat_sub_ann <- ComplexHeatmap::HeatmapAnnotation(
+      df = sample_info,
+      col = group_pal,
+      show_legend = TRUE
+    )
+    groups <- names(group_pal)
+    
+  } else {
+    
+    if (!is.null(sample_info) && !is.null(select_factors_heatmap)) {
+      if (select_factors_heatmap == "Names") {
+        groups <- detect_groups(colnames(data))
+      } else {
+        ix <- match(select_factors_heatmap, colnames(sample_info))
+        groups <- sample_info[, ix]
+      }
     }
+    group_colors <- colorspace::qualitative_hcl(length(unique(groups)), 
+                                                 palette = sample_color,
+                                                 c = 70)
+    group_colors <- setNames(group_colors, unique(groups))
+    
+    heat_sub_ann <- ComplexHeatmap::HeatmapAnnotation(
+      Group = groups,
+      col = list(Group = setNames(group_colors, unique(groups))),
+      show_annotation_name = list(Group = FALSE),
+      show_legend = FALSE
+    )
   }
-
-  groups_colors <- gg_color_hue(length(unique(groups)))
-  group_colors <- setNames(groups_colors, unique(groups))
-
-  if (length(unique(groups)) < 10) {
+  if (select_factors_heatmap != "All factors" && length(unique(groups)) < 10) {
     lgd <- ComplexHeatmap::Legend(
       at = unique(groups),
-      legend_gp = grid::gpar(fill = groups_colors),
+      legend_gp = grid::gpar(fill = group_colors),
       nrow = 1
     )
+    
   } else {
     lgd <- NULL
   }
-
-  heat_sub_ann <- ComplexHeatmap::HeatmapAnnotation(
-    Group = groups,
-    col = list(Group = setNames(groups_colors, unique(groups))),
-    show_annotation_name = list(Group = FALSE),
-    show_legend = FALSE
-  )
-
   return(list(
     heat_sub_ann = heat_sub_ann,
     lgd = lgd,
@@ -660,6 +694,8 @@ Sample: @{sample},  Group: @{group_name} <span style='background-color:@{group_c
 #' @param select_factors_heatmap Group design to label by
 #' @param cluster_meth Integer indicating which clustering method to use 1 for
 #'   hierarchical and 2 for kmeans.
+#' @param group_pal Named list of colors and their corresponding categories
+#' @param sample_color Selected colorspace color palette
 #'
 #' @export
 #' @return A list containing a Heatmap from the brush selection
@@ -674,7 +710,9 @@ heat_sub <- function(ht_brush,
                      heatmap_data,
                      sample_info,
                      select_factors_heatmap,
-                     cluster_meth) {
+                     cluster_meth,
+                     group_pal = NULL,
+                     sample_color = NULL) {
   max_gene_ids <- 2000
   lt <- InteractiveComplexHeatmap::getPositionFromBrush(ht_brush)
   pos1 <- lt[[1]]
@@ -688,14 +726,15 @@ heat_sub <- function(ht_brush,
     verbose = FALSE,
     ht_pos = ht_pos_main
   )
-
   column_index <- unlist(pos[1, "column_index"])
 
   # Annotation, groups, and legend
   sub_heat <- sub_heat_ann(
     data = heatmap_data,
     sample_info = sample_info,
-    select_factors_heatmap = select_factors_heatmap
+    select_factors_heatmap = select_factors_heatmap,
+    group_pal = group_pal,
+    sample_color = sample_color
   )
   sub_ann <- sub_heat$heat_sub_ann[column_index]
   sub_groups <- sub_heat$groups[column_index]
@@ -963,4 +1002,71 @@ prep_download <- function(heatmap,
   } else {
     return(heatmap_data)
   }
+}
+
+#' Prepare Word Cloud Data
+#' 
+#' Prepares words in pathway and corresponding frequencies for 
+#' constructing word clouds
+#'
+#' @param gene_lists List of gene data within each cluster
+#' @param cluster Selected cluster from k-means clustering
+#' @param select_org Selected organism
+#' @param gmt_file Optional custom GMT file
+#' @param idep_data iDEP data 
+#' @param gene_info Gene info from pre-processing step
+#' @param cloud_go GO selected for word cloud. KEGG, GOBP, etc. 
+#' @param converted Converted data from pre-processing
+#'
+#' @returns Returns data frame of words from pathways in the selected cluster
+#' and their frequencies.
+#' @export
+#'
+prep_cloud_data <- function(gene_lists,
+                            cluster,
+                            cloud_go,
+                            select_org,
+                            converted,
+                            gmt_file,
+                            idep_data,
+                            gene_info){
+  
+  # Retrieve pathway information
+  paths1 <- read_pathway_sets(
+    all_gene_names_query = gene_lists[[cluster]],
+    converted = converted,
+    go = cloud_go,
+    select_org = select_org,
+    gmt_file = gmt_file,
+    idep_data = idep_data,
+    gene_info = gene_info
+  )
+  
+  # If null, either error or no pathways found
+  if (is.null(paths1)) {
+    return("Pathways Not Found")
+  }
+  
+  # Select description, remove path ID
+  paths1 <- data.frame(
+    Descr = remove_pathway_id(names(paths1$pathway_table$gene_sets), cloud_go), 
+    n = t(as.data.frame(lapply(paths1$pathway_table$gene_sets, length))), 
+    row.names = NULL
+  )
+  
+  # Remove common words/punctuation
+  words1 <- paths1 |>
+    dplyr::mutate(Descr = gsub("[-[:punct:]]", " ", Descr),
+                  Descr = gsub("\\s+", " ", Descr),
+                  Descr = trimws(Descr))|>
+    tidytext::unnest_tokens(word, Descr) |> # Tokenize the descriptions
+    dplyr::filter(!word %in% c("pathway", "pathways"),
+                  nchar(word) > 2) |>
+    dplyr::anti_join(tidytext::stop_words, by = "word") |>
+    dplyr::group_by(word) |>
+    dplyr::summarise(n = sum(n, na.rm = TRUE)) |>
+    dplyr::arrange(-n)
+
+  colnames(words1)[2] <- paste0("Cluster", cluster)
+  return(words1)
 }

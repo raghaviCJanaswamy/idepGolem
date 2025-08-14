@@ -22,6 +22,20 @@ mod_03_clustering_ui <- function(id) {
       # Heatmap Panel Sidebar ----------
       sidebarPanel(
         width = 3,
+        div(
+          style = "text-align: right;",
+          actionButton(
+            inputId = ns("submit_model_button"),
+            label = "Submit",
+            style = "font-size: 16px; color: red;"
+          )
+        ),
+        tippy::tippy_this(
+          ns("submit_model_button"),
+          "Run Cluster analysis",
+          theme = "light-border"
+        ),
+        br(),
         # Select Clustering Method ----------
         conditionalPanel(
           condition = "input.cluster_panels == 'Heatmap' |
@@ -40,6 +54,7 @@ mod_03_clustering_ui <- function(id) {
         HTML('<hr style="height:1px;border:none;color:#333;background-color:#333;" />'),
         conditionalPanel(
           condition = "input.cluster_panels == 'Heatmap' |
+          input.cluster_panels == 'word_cloud' |
           input.cluster_panels == 'Gene SD Distribution' ",
           fluidRow(
             column(width = 6, p("Top Genes:")),
@@ -68,7 +83,8 @@ mod_03_clustering_ui <- function(id) {
         ),
         conditionalPanel(
           condition = "(input.cluster_panels == 'Heatmap' |
-            input.cluster_panels == 'sample_tab') &&  input.cluster_meth == 2",
+          input.cluster_panels == 'word_cloud' |
+          input.cluster_panels == 'sample_tab') &&  input.cluster_meth == 2",
 
           # k- means slidebar -----------
 
@@ -84,7 +100,7 @@ mod_03_clustering_ui <- function(id) {
           # Re-run k-means with a different seed
           actionButton(
             inputId = ns("k_means_re_run"),
-            label = "Re-Run"
+            label = "New Seed"
           ),
           tippy::tippy_this(
             ns("k_means_re_run"),
@@ -113,6 +129,7 @@ mod_03_clustering_ui <- function(id) {
         conditionalPanel(
           condition = "input.cluster_meth == 1 &&
             (input.cluster_panels == 'Heatmap' |
+            input.cluster_panels == 'word_cloud' |
             input.cluster_panels == 'sample_tab')",
           fluidRow(
             column(width = 4, p("Distance")),
@@ -144,7 +161,7 @@ mod_03_clustering_ui <- function(id) {
           ns = ns
         ),
         conditionalPanel(
-          condition = "input.cluster_panels == 'Heatmap' ",
+          condition = "input.cluster_panels == 'Heatmap'",
           fluidRow(
             column(width = 4, p("Samples color")),
             column(
@@ -156,7 +173,12 @@ mod_03_clustering_ui <- function(id) {
             column(width = 4, p("Label Genes:")),
             column(
               width = 8,
-              htmlOutput(ns("selected_genes_ui"))
+              selectizeInput(
+                inputId = ns("selected_genes"),
+                label = NULL,
+                choices = c("Top 5", "Top 10", "Top 15"),
+                multiple = TRUE
+              )
             )
           ),
           checkboxInput(ns("customize_button"), "More options"),
@@ -180,6 +202,14 @@ mod_03_clustering_ui <- function(id) {
             label = "Normalize genes (divide by SD)",
             value = FALSE
           ),
+          selectInput(
+            inputId = ns("sample_color"),
+            label = "Experiment Group Colors",
+            choices = c("Pastel 1", "Dark 2", "Dark 3", 
+                        "Set 2", "Set 3", "Warm",
+                        "Cold", "Harmonic", "Dynamic"),
+            selected = "Dynamic"
+          ),
           numericInput(
             inputId = ns("heatmap_cutoff"),
             label = "Max Z score:",
@@ -187,21 +217,30 @@ mod_03_clustering_ui <- function(id) {
             min = 2,
             step = 1
           ),
-          fluidRow(
-            column(
-              width = 6,
-              downloadButton(
-                outputId = ns("download_heatmap_data"),
-                label = "Heatmap data"
-              )
-            )
+          ns = ns
+        ),
+        conditionalPanel(
+          condition = "input.cluster_panels == 'word_cloud'",
+          uiOutput(
+            outputId = ns("cloud_ui")
           ),
           ns = ns
         ),
         br(),
-        downloadButton(
-          outputId = ns("report"),
-          label = "Report"
+        div(
+          style = "display: flex; flex: wrap; gap: 5px;",
+          downloadButton(
+            outputId = ns("report"),
+            label = "Report"
+          ),
+          conditionalPanel(
+            condition = "input.cluster_panels == 'Heatmap' ",
+            downloadButton(
+              outputId = ns("download_heatmap_data"),
+              label = "Heatmap data"
+            ),
+            ns = ns
+          )
         ),
         tippy::tippy_this(
           ns("report"),
@@ -237,7 +276,9 @@ mod_03_clustering_ui <- function(id) {
                   outputId = ns("heatmap_main"),
                   height = "450px",
                   width = "100%",
-                  brush = ns("ht_brush")
+                  brush = brushOpts(id = ns("ht_brush"),
+                                    delayType = "debounce",
+                                    clip = TRUE)
                 ),
                 fluidRow(
                   column(
@@ -290,7 +331,25 @@ mod_03_clustering_ui <- function(id) {
               )
             )
           ),
-
+          tabPanel(
+            br(),
+            div('Generate a word cloud of pathways that contain genes from the 
+                selected cluster (Must run clustering with heatmap first). 
+                Words are ranked by frequency.'),
+            uiOutput(
+              outputId = ns("cloud_error")
+            ),
+            title = "Word Cloud",
+            value = "word_cloud",
+            wordcloud2::wordcloud2Output(
+              outputId = ns("word_cloud"),
+              height = "600px"
+            ),
+            downloadButton(
+              outputId = ns("cloud_download"),
+              label = "Data Download"
+            )
+          ),
           # Gene Standard Deviation Distribution ----------
           tabPanel(
             title = "Gene SD Distribution",
@@ -359,13 +418,20 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
         max = max_genes
       )
     })
-
     observe({
-      shinyjs::toggle(id = "sample_clustering", condition = input$customize_button)
-      shinyjs::toggle(id = "show_row_dend", condition = input$customize_button)
-      shinyjs::toggle(id = "heatmap_cutoff", condition = input$customize_button)
-      shinyjs::toggle(id = "gene_normalize", condition = input$customize_button)
-      shinyjs::toggle(id = "gene_centering", condition = input$customize_button)
+
+      shinyjs::toggle(id = "sample_clustering", 
+                      condition = input$customize_button)
+      shinyjs::toggle(id = "show_row_dend", 
+                      condition = input$customize_button)
+      shinyjs::toggle(id = "heatmap_cutoff", 
+                      condition = input$customize_button)
+      shinyjs::toggle(id = "gene_normalize", 
+                      condition = input$customize_button)
+      shinyjs::toggle(id = "gene_centering", 
+                      condition = input$customize_button)
+      shinyjs::toggle(id = "sample_color", 
+                      condition = input$customize_button)
     })
 
     # Distance functions -----------
@@ -407,7 +473,7 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
     })
 
     # Standard Deviation Density Plot ----------
-    sd_density_plot <- reactive({
+    sd_density_plot <- eventReactive(input$submit_model_button, {
       req(!is.null(pre_process$data()))
 
       p <- sd_density(
@@ -437,7 +503,7 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
 
 
     # Heatmap Data -----------
-    heatmap_data <- reactive({
+    heatmap_data <- eventReactive(input$submit_model_button, {
       req(!is.null(pre_process$data()))
 
       process_heatmap_data(
@@ -454,17 +520,17 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
 
 
     # Heatmap Click Value ---------
-    output$selected_genes_ui <- renderUI({
+    observeEvent(input$submit_model_button, {
       req(!is.null(pre_process$all_gene_names()))
       req(!is.null(pre_process$data()))
       req(!is.null(heatmap_data()))
 
-      selectizeInput(
-        inputId = ns("selected_genes"),
+      updateSelectizeInput(
+        session = session,
+        inputId = "selected_genes",
         label = NULL,
-        choices = row.names(heatmap_data()),
-        selected = NULL,
-        multiple = TRUE
+        choices = c("Top 5", "Top 10", "Top 15", row.names(heatmap_data())),
+        selected = input$selected_genes
       )
     })
 
@@ -480,7 +546,6 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
     output$heatmap_main <- renderPlot(
       {
         req(!is.null(heatmap_data()))
-        req(input$select_factors_heatmap)
         #      req(input$selected_genes)
 
         shinybusy::show_modal_spinner(
@@ -499,10 +564,31 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
       width = 240 # , # this avoids the heatmap being redraw
       # height = 600
     )
-
-    heatmap_main_object <- reactive({
+    
+    # Color palette for experiment groups on heatmap
+    group_pal <- eventReactive(input$submit_model_button, {
+      req(!is.null(pre_process$sample_info()))
+      req(!is.na(input$sample_color))
+      
+      groups <- as.vector(as.matrix(pre_process$sample_info()))
+      pal <- setNames(
+        colorspace::qualitative_hcl(length(unique(groups)), 
+                                    palette = input$sample_color,
+                                    c = 70),
+        unique(groups)
+      )
+      sample_list <- as.list(as.data.frame(pre_process$sample_info()))
+      
+      lapply(sample_list, function(x){
+        setNames(
+          pal[unique(x)], 
+          unique(x)
+        )
+      })
+    })
+    
+    heatmap_main_object <- eventReactive(input$submit_model_button, {
       req(!is.null(heatmap_data()))
-      req(input$select_factors_heatmap)
 
       # Assign heatmap to be used in multiple components
       try(
@@ -520,7 +606,9 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
           row_dend = input$show_row_dend,
           k_clusters = input$k_clusters,
           re_run = input$k_means_re_run,
-          selected_genes = input$selected_genes
+          selected_genes = input$selected_genes,
+          group_pal = group_pal(),
+          sample_color = input$sample_color
         )
       )
 
@@ -605,7 +693,9 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
     # Subheatmap creation ---------
     output$sub_heatmap <- renderPlot(
       {
-        if (is.null(input$ht_brush)) {
+        req(!is.null(heatmap_main_object()))
+        
+        if (is.null(input$ht_brush) || is.null(heatmap_sub_object_calc())) {
           grid::grid.newpage()
           grid::grid.text("Select a region on the heatmap to zoom in.
         Selection can be adjusted from the sides.
@@ -645,26 +735,57 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
       # width = 500 # this avoids the heatmap being redraw
     )
 
+    # Reactive input versions to store values every submit press
+    selected_factors_heatmap <- eventReactive(input$submit_model_button, {
+      req(!is.na(input$select_factors_heatmap))
+      input$select_factors_heatmap
+    })
+    
+    submitted_pal <- eventReactive(input$submit_model_button, {
+      input$sample_color
+    })
 
-
+    current_method <- eventReactive(input$submit_model_button, {
+      input$cluster_meth
+    })
+    
     heatmap_sub_object_calc <- reactive({
-      try( # tolerates error; otherwise stuck with spinner
-        submap_return <- heat_sub(
+      req(!is.null(heatmap_main_object()))
+      req(!is.null(submitted_pal()))
+      req(!is.null(selected_factors_heatmap()))
+      
+      submap_return <- tryCatch({ # tolerates error; otherwise stuck with spinner
+        heat_sub(
           ht_brush = input$ht_brush,
           ht = shiny_env$ht,
           ht_pos_main = shiny_env$ht_pos_main,
           heatmap_data = heatmap_data(),
           sample_info = pre_process$sample_info(),
-          select_factors_heatmap = input$select_factors_heatmap,
-          cluster_meth = input$cluster_meth
-        )
+          select_factors_heatmap = selected_factors_heatmap(),
+          cluster_meth = current_method(),
+          group_pal = group_pal(),
+          sample_color = submitted_pal()
+        )},
+        error = function(e) {e$message}
       )
+      
+      if ("character" %in% class(submap_return)){
+        submap_return <- NULL
+      }
+      
+      if (!is.null(dim(submap_return$ht_select))){
+        if (nrow(submap_return$ht_select) == 0 || 
+            ncol(submap_return$ht_select) == 0) {
+          submap_return <- NULL
+        }
+      }
 
       return(submap_return)
     })
     # Subheatmap creation ---------
     heatmap_sub_object <- reactive({
-      if (is.null(input$ht_brush)) {
+      req(!is.null(heatmap_main_object()))
+      if (is.null(input$ht_brush) || is.null(heatmap_sub_object_calc())) {
         grid::grid.newpage()
         grid::grid.text("Select a region on the heatmap to zoom in.", 0.5, 0.5)
       } else {
@@ -702,7 +823,7 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
     gene_lists <- reactive({
       req(!is.null(pre_process$select_gene_id()))
       req(!is.null(input$ht_brush) || input$cluster_meth == 2)
-
+      
       gene_lists <- list()
 
       if (input$cluster_meth == 1) {
@@ -743,7 +864,8 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
           }
         }
         clusts$id <- rownames(heatmap_data()[clusts$row_order, ])
-
+        
+        req(length(unique(clusts$cluster)) == input$k_clusters)
         # disregard user selection use clusters for enrichment
         for (i in 1:input$k_clusters) {
           cluster_data <- subset(clusts, cluster == i)
@@ -760,12 +882,50 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
             dplyr::select_if(gene_names, is.character)
         }
       }
-
       return(gene_lists)
     })
+    
+    k_means_list <- eventReactive(input$submit_model_button, {
+      req(!is.null(gene_lists()))
+      gene_lists()
+    })
+    
+    gene_list_clust <- reactive({
+      req(!is.null(input$cluster_meth))
+      
+      if (current_method() == 1){
+        gene_lists()
+      } else {
+        req(!is.null(k_means_list()))
+        k_means_list()
+      }
+    })
 
+    output$cloud_ui <- renderUI({
+      req(!is.null(k_means_list()))
+      tagList(
+        selectInput(
+          label = "Select Cluster:",
+          inputId = ns("select_cluster"),
+          choices = unique(names(k_means_list())),
+          selected = unique(names(k_means_list()))[1]
+        ),
+        selectInput(
+          label = "Select GO:",
+          inputId = ns("cloud_go"),
+          choices = setNames(
+            c( "KEGG", "GOBP", "GOCC", "GOMF"),
+            c("KEGG",
+              "GO Biological Process",
+              "GO Cellular Component",
+              "GO Molecular Function")
+          )
+        )
+      )
+    })
+    
     # Sample Tree ----------
-    sample_tree <- reactive({
+    sample_tree <- eventReactive(input$submit_model_button, {
       req(!is.null(pre_process$data()), input$cluster_meth == 1)
 
       draw_sample_tree(
@@ -802,6 +962,10 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
           inputId = "cluster_panels",
           target = "sample_tab"
         )
+        hideTab(
+          inputId = "cluster_panels",
+          target = "word_cloud"
+        )
       }
     })
 
@@ -810,6 +974,10 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
         hideTab(
           inputId = "cluster_panels",
           target = "sample_tab"
+        )
+        showTab(
+          inputId = "cluster_panels",
+          target = "word_cloud"
         )
       }
     })
@@ -872,17 +1040,20 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
         write.csv(heatmap_data_download(), file)
       }
     )
-
+    
     enrichment_table_cluster <- mod_11_enrichment_server(
       id = "enrichment_table_cluster",
       gmt_choices = reactive({
         pre_process$gmt_choices()
       }),
       gene_lists = reactive({
-        gene_lists()
+        gene_list_clust()
       }),
       processed_data = reactive({
         pre_process$data()
+      }),
+      filter_size = reactive({
+        pre_process$filter_size()
       }),
       gene_info = reactive({
         pre_process$all_gene_info()
@@ -902,9 +1073,69 @@ mod_03_clustering_server <- function(id, pre_process, load_data, idep_data, tab)
       }),
       ggplot2_theme = reactive({
         pre_process$ggplot2_theme()
+      }),
+      heat_colors = reactive({
+        strsplit(load_data$heatmap_color_select(), "-")[[1]][c(1,3)]
       })
     )
-
+    
+    # Generate word/frequency data for word cloud
+    word_cloud_data <- reactive({
+      req(!is.na(input$select_cluster))
+      req(!is.null(input$cloud_go))
+      req(!is.null(k_means_list()))
+      
+      shinybusy::show_modal_spinner(
+        spin = "orbit",
+        text = "Creating Word Cloud",
+        color = "#000000"
+      )
+      prep_cloud_data(gene_lists = k_means_list(), 
+                      cluster = input$select_cluster,
+                      cloud_go = input$cloud_go,
+                      select_org = pre_process$select_org(),
+                      converted = pre_process$converted(),
+                      gmt_file = pre_process$gmt_file(),
+                      idep_data = idep_data,
+                      gene_info = pre_process$all_gene_info())
+    })
+    
+    output$word_cloud <- wordcloud2::renderWordcloud2({
+      req(!is.null(word_cloud_data()))
+      
+      shinybusy::remove_modal_spinner()
+      
+      if ("character" %in% class(word_cloud_data())){
+        NULL
+      } else {
+        
+        wordcloud2::wordcloud2(word_cloud_data(),
+                               shape = "circle",
+                               rotateRatio = 0,
+                               color = "random-dark",
+                               shuffle = FALSE)
+      }
+    })
+    
+    # Error message UI for word cloud
+    output$cloud_error <- renderUI({
+      req(!is.null(word_cloud_data()))
+      
+      if ("character" %in% class(word_cloud_data())){
+        div(style = "color:red;",
+            "Pathways Not Found for selected cluster!")
+      } else {NULL}
+    })
+    
+    output$cloud_download <- downloadHandler(
+      filename = "word_cloud_data.csv",
+      content = function(file) {
+        req(!is.null(word_cloud_data()))
+        
+        write.csv(word_cloud_data(), file)
+      }
+    )
+    
     # Markdown report------------
     output$report <- downloadHandler(
 

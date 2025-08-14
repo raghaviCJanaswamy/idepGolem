@@ -173,7 +173,7 @@ get_network <- function(select_wgcna_module,
   module <- unlist(strsplit(select_wgcna_module, " "))[2]
   module_colors <- wgcna$dynamic_colors
   in_module <- (module_colors == module)
-
+  
   if (select_wgcna_module == "Entire network") {
     in_module <- rep(TRUE, length(in_module))
   }
@@ -210,13 +210,19 @@ get_network <- function(select_wgcna_module,
   }
   }
 
-  net <- mod_tom[top, top]
+  net <- mod_tom[top, top, drop = FALSE]
 
   if (!is.null(probe_to_gene)) {
     ix <- match(colnames(net), probe_to_gene[, 1])
-    colnames(net) <- probe_to_gene[ix, 2]
+    colnames(net) <- dplyr::case_when(
+      !is.na(probe_to_gene[ix, 2]) ~ probe_to_gene[ix, 2],
+      TRUE ~ colnames(net)
+    )
     ix <- match(rownames(net), probe_to_gene[, 1])
-    rownames(net) <- probe_to_gene[ix, 2]
+    rownames(net) <- dplyr::case_when(
+      !is.na(probe_to_gene[ix, 2]) ~ probe_to_gene[ix, 2],
+      TRUE ~ rownames(net)
+    )
   }
 
   return(net)
@@ -240,17 +246,19 @@ get_network_plot <- function(adjacency_matrix, edge_threshold) {
     adjacency_matrix[i, i] <- FALSE
   }
   graph <- igraph::graph_from_adjacency_matrix(adjacency_matrix, mode = "undirected")
-
   # http://www.kateto.net/wp-content/uploads/2016/01/NetSciX_2016_Workshop.pdf
-  net_plot <- function() {
-    plot(
-      graph,
-      vertex.label.color = "black",
-      vertex.label.dist = 3,
-      vertex.size = 7
-    )
-  }
-  return(net_plot)
+  ggraph_obj <- ggraph::ggraph(graph, layout = "fr") +
+    ggraph::geom_edge_link(edge_colour = "darkgrey") +
+    ggraph::geom_node_point(shape = 21, 
+                            size = 3.5, 
+                            fill = "gold", 
+                            color = "black",
+                            stroke = 0.5) +
+    ggraph::geom_node_text(ggplot2::aes(label = name), 
+                           repel = TRUE, 
+                           size = 4.5)+
+    ggplot2::theme_void()
+  return(ggraph_obj)
 }
 
 
@@ -450,9 +458,9 @@ all_gene_info) {
 #' @return A dataframe containing for csv file
 prepare_module_csv_filter <- function(
     module_data,
-    module) {
-  if (module == "ALL") {
+    module_select) {
+  if (module_select == "Entire network") {
     return(module_data)
   }
-  return(subset(module_data, module == module))
+  return(subset(module_data, module == substr(module_select, 0, 1)))
 }

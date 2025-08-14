@@ -236,7 +236,15 @@ mod_05_deg_2_ui <- function(id) {
     title = "DEG2",
     sidebarLayout(
       sidebarPanel(
-        style = "height: 90vh; overflow-y: auto;", 
+        style = "height: 90vh; overflow-y: auto;",
+        div(
+          style = "text-align: right;",
+          actionButton(
+            inputId = ns("submit_deg2"),
+            label = "Submit",
+            style = "font-size: 16px; color: red;"
+          )
+        ),
         htmlOutput(outputId = ns("list_comparisons")),
         p("Select a comparison to examine the associated DEGs.
           \"A-B\" means A vs. B (See heatmap).
@@ -252,6 +260,10 @@ mod_05_deg_2_ui <- function(id) {
               inputId = ns("heatmap_fdr_fold"),
               label = "Sort by Fold Change or FDR",
               choices = c("Fold Change", "FDR")
+            ),
+            downloadButton(
+              outputId = ns("download_heat_data"),
+              label = "Heatmap Data"
             ),
             ns = ns
             ),
@@ -529,8 +541,9 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
       )
     )
 
-    # Observe submit button ------
     deg <- reactiveValues(limma = NULL)
+    warning_type <- reactiveVal(NULL)
+    # Observe submit button ------
     observeEvent(
       input$submit_model_button,
       {
@@ -538,7 +551,6 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
           !is.null(pre_process$data()))
         withProgress(message = "DEG analysis...", {
           incProgress(0.4)
-
           # only use with DESeq2
           threshold_wald_test <- FALSE
           if (input$counts_deg_method == 3) {
@@ -549,36 +561,91 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
           if (input$counts_deg_method == 3) {
             independent_filtering <- input$independent_filtering
           }
-
-          deg$limma <- limma_value(
-            data_file_format = pre_process$data_file_format(),
-            counts_deg_method = input$counts_deg_method,
-            raw_counts = pre_process$raw_counts(),
-            limma_p_val = input$limma_p_val,
-            limma_fc = input$limma_fc,
-            select_model_comprions = input$select_model_comprions,
-            sample_info = pre_process$sample_info(),
-            select_factors_model = input$select_factors_model,
-            select_interactions = input$select_interactions,
-            select_block_factors_model = input$select_block_factors_model,
-            factor_reference_levels = factor_reference_levels(),
-            processed_data = pre_process$data(),
-            counts_log_start = pre_process$counts_log_start(),
-            p_vals = pre_process$p_vals(),
-            threshold_wald_test = threshold_wald_test,
-            independent_filtering = independent_filtering,
-            descr = pre_process$descr()
-          )
-
-          updateTabsetPanel(
-            session = session,
-            inputId = "step_1",
-            selected = "results"
-          )
+          
+          if (is.null(input$select_model_comprions)) {
+            warning_type("NoComparison")
+            deg$limma <- NULL
+          } else {
+            deg$limma <- limma_value(
+              data_file_format = pre_process$data_file_format(),
+              counts_deg_method = input$counts_deg_method,
+              raw_counts = pre_process$raw_counts(),
+              limma_p_val = input$limma_p_val,
+              limma_fc = input$limma_fc,
+              select_model_comprions = input$select_model_comprions,
+              sample_info = pre_process$sample_info(),
+              select_factors_model = input$select_factors_model,
+              select_interactions = input$select_interactions,
+              select_block_factors_model = input$select_block_factors_model,
+              factor_reference_levels = factor_reference_levels(),
+              processed_data = pre_process$data(),
+              counts_log_start = pre_process$counts_log_start(),
+              p_vals = pre_process$p_vals(),
+              threshold_wald_test = threshold_wald_test,
+              independent_filtering = independent_filtering,
+              descr = pre_process$descr()
+            )
+            # Check for returned errors
+            if ("character" %in% class(deg$limma)){
+              if (grepl("the model matrix is not full rank", deg$limma)){
+                warning_type("FullRankError")
+                deg$limma <- NULL
+              } else {
+                warning_type("Unknown")
+                deg$limma <- NULL
+              }
+            } else {
+              updateTabsetPanel(
+                session = session,
+                inputId = "step_1",
+                selected = "results"
+              )
+            }
+          }
         })
       }
     )
 
+    # Dynamic modal for different error types in DEG1
+    observe({
+      req(!is.null(warning_type()))
+        modal_title <- switch(
+          warning_type(),
+          "FullRankError" = "Please Check Experiment Design",
+          "NoComparison" = "No Comparison Selected",
+          "Unknown Error" = "Analysis Error Occurred"
+        )
+        modal_text <- switch(
+          warning_type(),
+          "FullRankError" = paste(
+            'The model matrix generated for the analysis is not 
+            "full rank." This is often due to a flaw in the experimental 
+            design submitted. Check that all combinations of design factors are 
+            accounted for and have entries in your data.'
+          ),
+          "NoComparison" = paste(
+          "No comparisons selected to perform DEG1 analysis on. Please select 
+          group comparisons (checkboxes) before submitting again."
+          ), 
+          "UnknownError" = paste(
+            "An unexpected error occurred during analysis. 
+             Please check your inputs and try again. If the error persists, 
+             contact the admin")
+        )
+        showModal(
+          modalDialog(
+            title = modal_title,
+            modal_text,
+            easyClose = TRUE,
+            footer = modalButton("Close"),
+            size = "s"
+          ),
+          session = session
+        )
+        
+        warning_type(NULL)
+    })
+    
     deg_info <- reactive({
       req(!is.null(deg$limma$results))
 
@@ -851,14 +918,14 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
       if (is.null(deg$limma$comparisons)) {
         selectInput(
           inputId = ns("select_contrast"),
-          label = NULL,
+          label = "Comparisons",
           choices = list("All" = "All"),
           selected = "All"
         )
       } else {
         selectInput(
           inputId = ns("select_contrast"),
-          label = NULL,
+          label = "Comparisons",
           choices = deg$limma$comparisons
         )
       }
@@ -884,7 +951,13 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
       req(!is.null(heat_data()$genes))
       
       number_heat_genes <- nrow(heat_data()$genes)
-      heat_number_vec <- seq(from = 5,to = number_heat_genes, by = 5)
+      
+      if (number_heat_genes < 5) {
+        start <- 1
+      } else {
+        start <- 5
+      }
+      heat_number_vec <- seq(from = start, to = number_heat_genes, by = start)
       heat_choices <- c("All DEGs", heat_number_vec)
       updateSelectInput(
         session = session,
@@ -906,50 +979,85 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
       )
     })
 
+    heat_names <- reactive({
+      req(!is.null(vol_data()))
+      req(!is.null(input$heatmap_fdr_fold))
+      req(!is.null(input$heatmap_gene_number))
+      req(input$heatmap_gene_number != "All DEGs")
+      
+      if(input$heatmap_fdr_fold == "FDR"){
+        # get ensembl id for number of genes with lowest FDR
+        heat_names <- vol_data()$data |>
+          dplyr::arrange(FDR) |>
+          dplyr::slice(1:input$heatmap_gene_number) |>
+          dplyr::pull(Row.names)
+      }
+      else if(input$heatmap_fdr_fold == "Fold Change"){
+        # get ensembl id for number of genes with highest Fold Change
+        heat_names <- vol_data()$data |>
+          dplyr::arrange(dplyr::desc(abs(Fold))) |>
+          dplyr::slice(1:input$heatmap_gene_number) |>
+          dplyr::pull(Row.names)
+      }
+    })
+    
+    heat_names_to_ensembl <- reactive({
+      req(!is.null(heat_names()))
+      
+      # match ensembl ids and symbols to filter
+      df <- pre_process$all_gene_names() |>
+        dplyr::filter(symbol %in% heat_names()) |>
+        dplyr::select(ensembl_ID)
+      df[['ensembl_ID']]
+    })
+    
     # bar to make the heatmap module reactive
     # otherwise, error when switching heatmap
     heatmap_bar <- reactive({
       req(!is.null(heat_data()))
       heat_data()$bar
     })
-  
-    observe({
+    
+    deg2_heat_bar <- eventReactive(input$submit_deg2, {
+      req(!is.null(heatmap_bar()))
+      req(!is.null(input$heatmap_gene_number))
+      
       if(input$heatmap_gene_number == "All DEGs"){
-        deg2_heat_data <- heat_data()$genes
-        deg2_heat_bar <- heatmap_bar()
+        heatmap_bar()
       }
       else{
-        if(input$heatmap_fdr_fold == "FDR"){
-          # get ensembl id for number of genes with lowest FDR
-          heat_names <- vol_data()$data |>
-            dplyr::arrange(FDR) |>
-            dplyr::slice(1:input$heatmap_gene_number) |>
-            dplyr::pull(Row.names)
-        }
-        else if(input$heatmap_fdr_fold == "Fold Change"){
-          # get ensembl id for number of genes with highest Fold Change
-          heat_names <- vol_data()$data |>
-            dplyr::arrange(dplyr::desc(abs(Fold))) |>
-            dplyr::slice(1:input$heatmap_gene_number) |>
-            dplyr::pull(Row.names)
-        }
-        # match ensembl ids and symbols to filter
-        heat_names_to_ensembl <- pre_process$all_gene_names() |>
-          dplyr::filter(symbol %in% heat_names) |>
-          dplyr::select(ensembl_ID)
-        heat_names_to_ensembl <- heat_names_to_ensembl[['ensembl_ID']]
+        req(!is.null(heat_names_to_ensembl()))
         
-        # filter heat_data()$genes and heatmap_bar() for desired genes
-        deg2_heat_data <- heat_data()$genes[rownames(heat_data()$genes) %in% heat_names_to_ensembl,]
-        deg2_heat_bar <- heatmap_bar()[names(heatmap_bar()) %in% heat_names_to_ensembl]
+        heatmap_bar()[names(heatmap_bar()) %in% heat_names_to_ensembl()]
       }
+    })
+    
+    deg2_heat_data <- eventReactive(input$submit_deg2, {
+      req(!is.null(heat_data()))
+      req(!is.null(input$heatmap_gene_number))
+      
+      if(input$heatmap_gene_number == "All DEGs"){
+        heat_data()$genes
+      }
+      else{
+        req(!is.null(heat_names_to_ensembl()))
+        # filter heat_data()$genes and heatmap_bar() for desired genes
+        heat_data()$genes[rownames(heat_data()$genes) %in% heat_names_to_ensembl(),]
+      }
+      
+    })
+    
+    observe({
+      req(!is.null(deg2_heat_data()))
+      req(!is.null(deg2_heat_bar()))
+      
       heatmap_module <- mod_12_heatmap_server(
         id = "12_heatmap_1",
         data = reactive({
-          deg2_heat_data
+          deg2_heat_data()
         }),
         bar = reactive({
-          deg2_heat_bar
+          deg2_heat_bar()
         }),
         all_gene_names = reactive({
           pre_process$all_gene_names()
@@ -988,9 +1096,33 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
         choices = plot_choices
       )
     })
+    
+    output$download_heat_data <- downloadHandler(
+      filename = function() {
+        "DEG2_Heatmap_Data.csv"
+      },
+      content = function(file) {
+        req(!is.null(deg2_heat_data()))
+        df <- deg2_heat_data()
+        # Center data to match heatmap
+        df <- df - rowMeans(df, na.rm = TRUE)
+        # Convert row names to gene symbols
+        df <- data.frame(
+          Gene_ID = rownames(df),
+          rowname_id_swap(
+            data_matrix = df,
+            all_gene_names = pre_process$all_gene_names(),
+            select_gene_id = pre_process$select_gene_id()
+          )
+        )
+        rownames(df) <- gsub(" ", "", rownames(df))  
+        
+        write.csv(df, file)
+      }
+    )
 
     # volcano plot -----
-    vol_data <- reactive({
+    vol_data <- eventReactive(input$submit_deg2, {
       req(input$select_contrast, deg$limma, input$limma_p_val, input$limma_fc)
 
       volcano_data(
@@ -1088,7 +1220,7 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
     )
 
     ## scatter plot-----------
-    scatter_plot <- reactive({
+    scatter_plot <- eventReactive(input$submit_deg2, {
       req(!is.null(deg$limma$top_genes))
 
       p <- plot_deg_scatter(
@@ -1129,19 +1261,19 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
       req(!is.null(heat_data()))
 
       return(
-        heat_data()$genes[heat_data()$bar == 1, ]
+        heat_data()$genes[heat_data()$bar == 1, , drop = FALSE]
       )
     })
     down_reg_data <- reactive({
       req(!is.null(heat_data()))
 
       return(
-        heat_data()$genes[heat_data()$bar == -1, ]
+        heat_data()$genes[heat_data()$bar == -1, , drop = FALSE]
       )
     })
 
     # enrichment analysis results for both up and down regulated gene
-    pathway_deg <- reactive({
+    pathway_deg <- eventReactive(input$submit_deg2, {
       req(!is.null(up_reg_data()))
       withProgress(message = "Enrichment analysis for DEGs.", {
         incProgress(0.1)
@@ -1154,14 +1286,19 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
           } else {
             data <- down_reg_data()
           }
-
+          
+          if (nrow(data) != 0){
           gene_names <- merge_data(
             all_gene_names = pre_process$all_gene_names(),
             data = data,
             merge_ID = "ensembl_ID"
           )
-          # Only keep the gene names and scrap the data
           deg_lists[[direction]] <- dplyr::select_if(gene_names, is.character)
+          } else {
+            deg_lists[[direction]] <- NULL
+          }
+          # Only keep the gene names and scrap the data
+          
           incProgress(0.5)
         }
       })
@@ -1179,6 +1316,9 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
       }),
       processed_data = reactive({
         pre_process$data()
+      }),
+      filter_size = reactive({
+        pre_process$filter_size()
       }),
       gene_info = reactive({
         pre_process$all_gene_info()
@@ -1198,6 +1338,9 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
       }),
       ggplot2_theme = reactive({
         pre_process$ggplot2_theme()
+      }),
+      heat_colors = reactive({
+        strsplit(load_data$heatmap_color_select(), "-")[[1]][c(1,3)]
       })
     )
 

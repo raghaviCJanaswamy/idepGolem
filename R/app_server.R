@@ -11,7 +11,7 @@ app_server <- function(input, output, session) {
   pdf(file = NULL)
 
   # define where database is located
-  db_ver <<- "data107"
+  db_ver <<- "data113"
   db_url <<- "http://bioinformatics.sdstate.edu/data/"
 
   # if environmental variable is not set, use relative path
@@ -49,6 +49,7 @@ app_server <- function(input, output, session) {
   mod_03_clustering_server(
     id = "clustering",
     pre_process = pre_process,
+    load_data = load_data,
     idep_data = idep_data,
     tab = tab
   )

@@ -13,6 +13,14 @@ mod_08_bicluster_ui <- function(id) {
     title = "Bicluster",
     sidebarLayout(
       sidebarPanel(
+        div(
+          style = "text-align: right;",
+          actionButton(
+            inputId = ns("submit_button"),
+            label = "Submit",
+            style = "font-size: 16px; color: red;"
+          )
+        ),
         h5(
           "Biclustering can discover genes correlated on subset of samples.
            Only useful when sample size is large(N>15)
@@ -104,8 +112,9 @@ mod_08_bicluster_server <- function(id, pre_process, idep_data, tab) {
     biclust_env <- new.env()
 
     # all clusters
-    biclustering <- reactive({
+    biclustering <- eventReactive(input$submit_button, {
       req(!is.null(pre_process$data()))
+      req(!is.na(input$n_genes))
 
       get_biclustering(
         data = pre_process$data(),
@@ -208,6 +217,9 @@ mod_08_bicluster_server <- function(id, pre_process, idep_data, tab) {
       processed_data = reactive({
         pre_process$data()
       }),
+      filter_size = reactive({
+        pre_process$filter_size()
+      }),
       gene_info = reactive({
         pre_process$all_gene_info()
       }),
@@ -226,6 +238,9 @@ mod_08_bicluster_server <- function(id, pre_process, idep_data, tab) {
       }),
       ggplot2_theme = reactive({
         pre_process$ggplot2_theme()
+      }),
+      heat_colors = reactive({
+        strsplit(pre_process$heatmap_color_select(), "-")[[1]][c(1,3)]
       })
     )
 

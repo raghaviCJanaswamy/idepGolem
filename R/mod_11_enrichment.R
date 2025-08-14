@@ -345,13 +345,15 @@ mod_11_enrichment_server <- function(id,
                                      gmt_choices, # list of pathway categories "GOBP"
                                      gene_lists, # list of genes, each element is a list
                                      processed_data,
+                                     filter_size,
                                      gene_info,
                                      idep_data,
                                      select_org,
                                      converted,
                                      gmt_file,
                                      plot_grid_lines,
-                                     ggplot2_theme) {
+                                     ggplot2_theme,
+                                     heat_colors) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     observe({
@@ -389,6 +391,26 @@ mod_11_enrichment_server <- function(id,
         inputId = ns("select_cluster"),
         selected = selected
       )
+    })
+    
+    observe({
+      req(!is.null(filter_size()))
+      
+      if(filter_size() < 1000) {
+        
+        updateCheckboxInput(
+          session = session,
+          inputId = "filtered_background",
+          value = FALSE
+        )
+      } else {
+        updateCheckboxInput(
+          session = session,
+          inputId = "filtered_background",
+          value = TRUE
+        )
+      }
+      
     })
 
     output$select_cluster <- renderUI({
@@ -432,6 +454,7 @@ mod_11_enrichment_server <- function(id,
     # returns a list object
     pathway_table <- reactive({
       req(!is.null(gene_lists()))
+
       withProgress(message = "Enrichment Analysis", {
         incProgress(0.2)
         pathway_info <- list()
@@ -449,6 +472,7 @@ mod_11_enrichment_server <- function(id,
             idep_data = idep_data,
             gene_info = gene_info()
           )
+
           pathway_info[[names(gene_lists())[i]]] <- find_overlap(
             pathway_table = gene_sets$pathway_table,
             query_set = gene_sets$query_set,
@@ -626,7 +650,7 @@ mod_11_enrichment_server <- function(id,
     # returns a data frame
     enrichment_dataframe <- reactive({
       req(!is.null(pathway_table()))
-
+      
       results_all <- do.call(
         rbind,
         # combine multiple data frames that are elements of a list
@@ -708,7 +732,8 @@ mod_11_enrichment_server <- function(id,
       enrichment_tree_plot(
         go_table = enrichment_dataframe_for_tree(),
         group = input$select_cluster,
-        right_margin = 30
+        right_margin = 30,
+        leaf_color_choices = heat_colors()
       )
     })
 
@@ -739,14 +764,14 @@ mod_11_enrichment_server <- function(id,
         up_down_reg_deg = input$select_cluster,
         wrap_text_network_deg = input$wrap_text_network_deg,
         layout_vis_deg = input$layout_vis_deg,
-        edge_cutoff_deg = input$edge_cutoff_deg
+        edge_cutoff_deg = input$edge_cutoff_deg,
+        group_color = heat_colors()
       )
     })
 
     # Interactive vis network plot
     output$vis_network_deg <- visNetwork::renderVisNetwork({
       req(!is.null(network_data_deg()))
-      req(nrow(network_data_deg()$edges) > 2)
       req(nrow(network_data_deg()$nodes) > 2)
       vis_network_plot(
         network_data = network_data_deg()
@@ -795,7 +820,11 @@ mod_11_enrichment_server <- function(id,
         colnames(res) <- gsub("group", "Grp.", colnames(res))
         res <- subset(res, select = -PathwaySize)
 
-        colnames(res)[ncol(res)] <- "Pathway (Click for more info)"
+        if (input$select_go != "All"){
+          colnames(res)[ncol(res)] <- "Pathway (Click for more info)"
+        } else {
+          colnames(res)[ncol(res) - 1]
+        }
         res <- subset(res, select = -nGenes)
         return(res)
       },
