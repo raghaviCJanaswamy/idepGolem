@@ -1,0 +1,62 @@
+{
+  "name": "idepGolemPackage",
+  "version": "1.0.0",
+  "description": "Electron wrapper for Golem Shiny app with R.framework bundled",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "fix-rframework": "bash scripts/pre_build_fix_rframework.sh",
+    "build": "electron-builder",
+    "dist:mac": "npm run fix-rframework && npm run build --mac",
+    "prod-build": "npm run fix-rframework && npm run build",
+    "post-build-check": "bash scripts/post_build_check.sh"
+  },
+  "dependencies": {
+    "cross-spawn": "7.0.6",
+    "electron-is-dev": "^2.0.0",
+    "start": "^5.1.0",
+    "wait-on": "^7.2.0"
+  },
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.idepGolem",
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "tar.gz"
+      ]
+    },
+    "files": [
+      "main.js",
+      "error.html",
+      "resources/**"
+    ],
+    "extraResources": [
+      {
+        "from": "electron/resources/R.framework",
+        "to": "R.framework"
+      },
+      {
+        "from": "app",
+        "to": "app"
+      }
+    ],
+    "asar": false
+  }
+}

@@ -71,7 +71,6 @@ Imports:
     rmarkdown,
     RSQLite,
     Rtsne,
-    runibic,
     shiny (>= 1.6.0),
     shinybusy,
     shinyjs,
@@ -110,5 +109,6 @@ LazyData: true
 RoxygenNote: 7.3.2
 Suggests: 
     testthat (>= 3.0.0)
+    devtools,
 VignetteBuilder: knitr
 Config/testthat/edition: 3
