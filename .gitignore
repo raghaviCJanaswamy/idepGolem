@@ -4,3 +4,16 @@
 .Ruserdata
 inst/doc
 data107
+electron/data**
+electron/resources/R*
+electron/dist**
+electron/node_modules
+electron/out
+electron/build
+electron/.vscode
+.DS_Store
+.vscode
+*.log
+*.rds
+*.sqlite
+*.sqlite-journal
