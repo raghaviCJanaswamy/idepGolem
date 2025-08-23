@@ -78,10 +78,10 @@ inside the `.app` at build time.
 
 ---
 
-### 3. Build the app
+### 3. Build the app - MAC
 ```bash
 cd electron
-npm run prod-build
+npm run dist:mac
 ```
 
 This runs:
@@ -92,14 +92,27 @@ This runs:
 Output:
 - `.dmg` and `.zip` in `electron/dist/`
 
----
 
-## Running the App
-- Install `.dmg`
-- Open `My Golem Electron` from Applications
-- Electron will:
-  1. Launch `Rscript run_app.R` from `Contents/Resources/app`
-  2. Start Shiny server on fixed port (e.g. `4242`)
-  3. Open `http://127.0.0.1:4242` in Electron window
+## MAC - Test Packaged files / Listing
 
----
+APP="dist/mac-arm64/idepGolemPackage.app"
+# See what electron-builder put under Contents/Resources
+ls -al "$APP/Contents/Resources"
+# See if your R.framework is there (it should be)
+ls -al "$APP/Contents/Resources/R.framework/Resources" || echo "R.framework missing"
+# Look for run_app.R anywhere inside Resources
+find "$APP/Contents/Resources" -name Rscript -maxdepth 5
+-------
+
+# Show where things landed
+ls -al "$APP/Contents/Resources/app/run_app.R"
+ls -al "$APP/Contents/Resources/R.framework/Resources/Rscript"
+
+# Now launch the packaged R with your packaged run_app.R
+"$APP/Contents/Resources/R.framework/Resources/Rscript" \
+  "$APP/Contents/Resources/app/run_app.R" \
+  --port 7777 --host 127.0.0.1
+
+# Test application from Terminal
+APP="dist/mac-arm64/idepGolemPackage.app" 
+"./$APP/Contents/MacOS/idepGolemPackage"

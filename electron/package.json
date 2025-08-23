@@ -2,12 +2,14 @@
   "name": "idepGolemPackage",
   "version": "1.0.0",
   "description": "Electron wrapper for Golem Shiny app with R.framework bundled",
+  "author": "Raghavi C. Janaswamy",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "fix-rframework": "bash scripts/pre_build_fix_rframework.sh",
     "build": "electron-builder",
     "dist:mac": "npm run fix-rframework && npm run build --mac",
+    "dist:mac-build": "npm run build --mac",
     "prod-build": "npm run fix-rframework && npm run build",
     "post-build-check": "bash scripts/post_build_check.sh"
   },
@@ -23,40 +25,26 @@
   },
   "build": {
     "appId": "com.idepGolem",
+    "asar": false,
     "mac": {
-      "target": [
-        "dmg",
-        "zip"
-      ]
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "gatekeeperAssess": false,      
+      "target": ["dmg", "zip"],
+      "extraResources": [
+        { "from": "resources/R.framework", "to": "R.framework" },
+         { "from": "app", "to": "app" }
+      ]      
     },
-    "win": {
-      "target": [
-        "nsis",
-        "zip"
-      ]
-    },
-    "linux": {
-      "target": [
-        "AppImage",
-        "deb",
-        "tar.gz"
-      ]
-    },
+    "win":   { "target": ["nsis", "zip"] },
+    "linux": { "target": ["AppImage", "deb", "zip"] },
     "files": [
       "main.js",
-      "error.html",
-      "resources/**"
+      "error.html"
     ],
     "extraResources": [
-      {
-        "from": "electron/resources/R.framework",
-        "to": "R.framework"
-      },
-      {
-        "from": "app",
-        "to": "app"
-      }
-    ],
-    "asar": false
+      { "from": "app", "to": "app" }
+    ]
   }
 }
