@@ -116,3 +116,18 @@ ls -al "$APP/Contents/Resources/R.framework/Resources/Rscript"
 # Test application from Terminal
 APP="dist/mac-arm64/idepGolemPackage.app" 
 "./$APP/Contents/MacOS/idepGolemPackage"
+
+## Live Logs
+
+"/Applications/idepGolemPackage.app/Contents/MacOS/idepGolemPackage"
+
+# Live log:
+tail -f "$(getconf DARWIN_USER_TEMP_DIR)"/golem-electron-debug.log 2>/dev/null || tail -f /tmp/golem-electron-debug.log
+
+
+# Data
+
+APP="dist/mac-arm64/idepGolemPackage.app"
+ls -al "$APP/Contents/Resources/app/data/data113.tar.gz"
+
+find "$APP/Contents/Resources" -name data113.tar.gz -maxdepth 5

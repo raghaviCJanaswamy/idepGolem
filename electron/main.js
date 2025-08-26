@@ -26,7 +26,8 @@ function REntryCandidates() {
   // Prod: we copy to "<Resources>/resources/app/run_app.R"
   const R = process.resourcesPath;
   return [
-    path.join(R, 'app', 'run_app.R'),              // if you switch to: "app"
+    path.join(R, 'app', 'run_app.R'),       
+    path.join(R, 'resources', 'app', 'run_app.R'), // fallback if you ever switch // if you switch to: "app"
   ];  
 }
 
@@ -36,22 +37,37 @@ function getRuntime() {
   const rp = app.isPackaged ? process.resourcesPath : __dirname;
 
   if (process.platform === 'darwin') {
-    // macOS: flattened R.framework lives under resources/R.framework/Resources
-    const R_RES = path.join(rp, 'resources', 'R.framework', 'Resources');
-    const rscriptCandidates = [
-      path.join(R_RES, 'Rscript'),
-      path.join(R_RES, 'bin', 'Rscript'),
+    // <App>.app/Contents/Resources/R.framework/Resources
+    const candidates = [
+      path.join(rp, 'R.framework', 'Resources', 'Rscript'),
+      path.join(rp, 'R.framework', 'Resources', 'bin', 'Rscript'),
+      // tolerate older “double resources” layouts:
+      path.join(rp, 'resources', 'R.framework', 'Resources', 'Rscript'),
+      path.join(rp, 'resources', 'R.framework', 'Resources', 'bin', 'Rscript'),
     ];
-    const rscript = rscriptCandidates.find(fs.existsSync) || 'Rscript';
-      return {
-        rscript,
-        env: {
-          R_HOME: R_RES,
-          DYLD_FALLBACK_LIBRARY_PATH: path.join(R_RES, 'lib'),
-          PATH: `${path.join(R_RES, 'bin')}:${R_RES}:${process.env.PATH || ''}`,
-        },
-      };
+    const rscript = candidates.find(fs.existsSync);
+    if (!rscript) {
+      log(`[FATAL] No Rscript; process.resourcesPath=${rp}\nChecked:\n${candidates.join('\n')}`);
+      dialog.showErrorBox('Rscript Not Found',
+        `Could not locate bundled Rscript.\nresourcesPath: ${rp}\nChecked:\n${candidates.join('\n')}\n`);
+      app.quit();
+      return undefined;
     }
+
+    // R_HOME = Resources dir (strip /bin if needed)
+    const R_RES = rscript.includes('/bin/')
+      ? path.dirname(path.dirname(rscript))
+      : path.dirname(rscript);
+
+    return {
+      rscript,
+      env: {
+        R_HOME: R_RES,
+        DYLD_FALLBACK_LIBRARY_PATH: path.join(R_RES, 'lib'),
+        PATH: `${path.join(R_RES, 'bin')}:${R_RES}:${process.env.PATH || ''}`,
+      },
+    };
+  }
 
   if (process.platform === 'win32') {
     // Future: choose one folder name and keep it consistent in extraResources
@@ -110,7 +126,13 @@ async function createWindow() {
   const host = '127.0.0.1';
   const port = Number(process.env.APP_PORT || 7777);
   const targetURL = `http://${host}:${port}`;
-
+  
+    // --- Stable locations we provide to R (no R code changes required) ---
+    const RESOURCES_DIR = process.resourcesPath;                  // .../Contents/Resources
+    const APP_DIR       = path.join(RESOURCES_DIR, 'app');        // read-only bundled assets
+    const DATA_PARENT   = path.join(app.getPath('userData'), 'idep'); // writable per-user root
+    fs.mkdirSync(DATA_PARENT, { recursive: true });
+  
   // locate run_app.R
   const rEntry = REntryCandidates().find(fs.existsSync);
   if (!rEntry) {
@@ -119,23 +141,36 @@ async function createWindow() {
     app.quit();
     return;
   }
-
-  const { rscript, env } = getRuntime();
-  const mergedEnv = { ...process.env, ...env };
+  const runtime = getRuntime();
+  if (!runtime) return;
+  const { rscript, env } = runtime;
+    // Env we inject for R:
+  // - IDEP_DATABASE: parent of <db_ver>, R code appends version; we point it at a writable place
+  // - IDEP_APP_DIR: where packaged assets live (handy if code needs it)
+  // - IDEP_DATA_DIR: same writable place (for caches/DB/etc.)
+  const extraEnv = {
+    IDEP_DATABASE: DATA_PARENT,
+    IDEP_APP_DIR: APP_DIR,
+    IDEP_DATA_DIR: DATA_PARENT,
+  };
 
   log(`=== Launch ${new Date().toISOString()} ===`);
-  log(`logPath: ${logPath}`);
-  log(`isDev: ${isDev}`);
+  log(`process.resourcesPath = ${RESOURCES_DIR}`);
   log(`Rscript: ${rscript}`);
   log(`run_app.R: ${rEntry}`);
+  log(`APP_DIR: ${APP_DIR}`);
+  log(`DATA_PARENT(user-writable): ${DATA_PARENT}`);
   log(`targetURL: ${targetURL}`);
-  log(`env extras: ${JSON.stringify(env)}`);
 
   // If your run_app.R accepts flags; otherwise switch to positional args
   const rArgs = [rEntry, '--port', String(port), '--host', host];
 
   try {
-    rProc = spawn(rscript, rArgs, { env: mergedEnv });
+    // IMPORTANT: merge extraEnv, and run with cwd = DATA_PARENT so "./<db_ver>" fallback is safe
+    rProc = spawn(rscript, rArgs, {
+      env: { ...process.env, ...env, ...extraEnv },
+      cwd: DATA_PARENT,
+    });
   } catch (err) {
     log(`Failed to spawn R: ${String(err)}`);
     dialog.showErrorBox('Rscript Error', `Could not start Rscript.\n${String(err)}\nLog: ${logPath}`);
@@ -152,7 +187,7 @@ async function createWindow() {
     
       // wait for Shiny/Golem to come up
       try {
-        await waitOn({ resources: [targetURL], timeout: 60000, validateStatus: s => s === 200 });
+    await waitOn({ resources: [targetURL], timeout: 60000, validateStatus: s => s >= 200 && s < 400 });
       } catch (err) {
         log(`waitOn failed: ${String(err)}`);
         dialog.showErrorBox('Startup Timeout', `App did not start at ${targetURL} within 60s.\nSee log: ${logPath}`);
