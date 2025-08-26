@@ -1,5 +1,5 @@
 {
-  "name": "idepGolemPackage",
+  "name": "idep-golem-package",
   "version": "1.0.0",
   "description": "Electron wrapper for Golem Shiny app with R.framework bundled",
   "author": "Raghavi C. Janaswamy",
@@ -11,7 +11,8 @@
     "dist:mac": "npm run fix-rframework && npm run build --mac",
     "dist:mac-build": "npm run build --mac",
     "prod-build": "npm run fix-rframework && npm run build",
-    "post-build-check": "bash scripts/post_build_check.sh"
+    "post-build-check": "bash scripts/post_build_check.sh",
+    "prepack": "bash scripts/prepare_r_framework.sh && bash scripts/verify_sources.sh"
   },
   "dependencies": {
     "cross-spawn": "7.0.6",
@@ -34,7 +35,7 @@
       "target": ["dmg", "zip"],
       "extraResources": [
         { "from": "resources/R.framework", "to": "R.framework" },
-         { "from": "app", "to": "app" }
+        { "from": "app", "to": "app" }
       ]      
     },
     "win":   { "target": ["nsis", "zip"] },
@@ -43,8 +44,6 @@
       "main.js",
       "error.html"
     ],
-    "extraResources": [
-      { "from": "app", "to": "app" }
-    ]
+    "afterPack": "./scripts/afterPack-prune-lproj.js"
   }
 }
