@@ -8,9 +8,12 @@
     "start": "electron .",
     "fix-rframework": "bash scripts/pre_build_fix_rframework.sh",
     "build": "electron-builder",
-    "dist:mac": "npm run fix-rframework && npm run build --mac",
+    "dist:mac": "npm run fix-rframework && electron-builder --mac",
+    "dist:linux": "npm run build --linux",
+    "dist:win": "npm run fix-rframework && electron-builder --win",
+    "dist:all": "npm run fix-rframework && electron-builder --win",
     "dist:mac-build": "npm run build --mac",
-    "prod-build": "npm run fix-rframework && npm run build",
+    "all-build": "npm run fix-rframework && npm run build",
     "post-build-check": "bash scripts/post_build_check.sh",
     "prepack": "bash scripts/prepare_r_framework.sh && bash scripts/verify_sources.sh"
   },
@@ -27,6 +30,10 @@
   "build": {
     "appId": "com.idepGolem",
     "asar": false,
+    "files": [
+      "main.js",
+      "error.html"
+    ],    
     "mac": {
       "hardenedRuntime": true,
       "entitlements": "entitlements.mac.plist",
@@ -38,12 +45,16 @@
         { "from": "app", "to": "app" }
       ]      
     },
-    "win":   { "target": ["nsis", "zip"] },
-    "linux": { "target": ["AppImage", "deb", "zip"] },
-    "files": [
-      "main.js",
-      "error.html"
-    ],
+    "win":   { 
+      "target": ["nsis", "zip"],
+      "extraResources": [ { "from": "resources/R.win", "to": "R.win" }]
+    },
+    "linux": {
+      "target": ["AppImage", "deb", "zip"],
+      "extraResources": [
+        { "from": "resources/R.linux", "to": "R.linux" }
+      ]
+      },
     "afterPack": "./scripts/afterPack-prune-lproj.js"
   }
 }
