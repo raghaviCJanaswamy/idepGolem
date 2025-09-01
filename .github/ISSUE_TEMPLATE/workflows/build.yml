@@ -1,0 +1,72 @@
+name: Build all platforms
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    defaults: { run: { working-directory: electron } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci
+      # You already have resources/R.framework in repo or prepare it here
+      - run: npm run dist:mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-dist
+          path: electron/dist/**
+
+  build-win:
+    runs-on: windows-latest
+    defaults: { run: { working-directory: electron } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Install R (Windows)
+        run: choco install -y r  # or r.portable
+        shell: powershell
+      - name: Stage R.win
+        shell: powershell
+        run: |
+          $r = (Get-ChildItem "C:\Program Files\R" | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          if (-not $r) { throw "R not found under C:\Program Files\R" }
+          New-Item -ItemType Directory -Force resources\R.win | Out-Null
+          Copy-Item "$r\*" resources\R.win -Recurse
+          if (-not (Test-Path "resources\R.win\bin\x64\Rscript.exe")) { throw "Rscript.exe not found in R.win\bin\x64" }
+      - run: npm ci
+      - run: npx electron-builder --win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-dist
+          path: electron/dist/**
+
+  build-linux:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: electron } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Install R (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y r-base
+      - name: Stage R.linux
+        run: |
+          mkdir -p resources/R.linux
+          R RHOME
+          RHOME=$(R RHOME)
+          cp -a "$RHOME/." resources/R.linux/
+          test -x resources/R.linux/bin/Rscript
+      - run: npm ci
+      - run: npx electron-builder --linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: electron/dist/**

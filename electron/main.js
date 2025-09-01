@@ -16,23 +16,18 @@ function log(...args) {
 
 // ---------- path helpers ----------
 function REntryCandidates() {
-  // Dev: keep a couple of common layouts
   if (isDev) {
     return [
       path.join(__dirname, 'app', 'run_app.R'),
       path.join(__dirname, '..',  'app', 'run_app.R'),
     ];
   }
-  // Prod: we copy to "<Resources>/resources/app/run_app.R"
   const R = process.resourcesPath;
   return [
     path.join(R, 'app', 'run_app.R'),       
     path.join(R, 'resources', 'app', 'run_app.R'), // fallback if you ever switch // if you switch to: "app"
   ];  
-}
-
-// Decide R runtime & env by platform. For now, mac is primary.
-// For Windows/Linux, leave stubs + dual naming so you can choose folder names later.
+}// Decide R runtime & env by platform. mac is primary; win/linux stubs kept for future.
 function getRuntime() {
   const rp = app.isPackaged ? process.resourcesPath : __dirname;
 
@@ -67,44 +62,65 @@ function getRuntime() {
         PATH: `${path.join(R_RES, 'bin')}:${R_RES}:${process.env.PATH || ''}`,
       },
     };
+
+  // WIn32
   }
 
   if (process.platform === 'win32') {
     // Future: choose one folder name and keep it consistent in extraResources
-    const roots = [
+      const tryRoots = [
+      path.join(rp, 'R.win'),
       path.join(rp, 'resources', 'R.win'),
+      path.join(rp, 'R-Portable'),
       path.join(rp, 'resources', 'R-Portable'),
     ];
-    const R_ROOT = roots.find(fs.existsSync);
-    const bin = R_ROOT ? path.join(R_ROOT, 'bin', 'x64') : null;
-    const rscript = bin ? path.join(bin, 'Rscript.exe') : 'Rscript.exe';
+    const R_ROOT = tryRoots.find(fs.existsSync);
+    const bin64  = R_ROOT ? path.join(R_ROOT, 'bin', 'x64') : null;
+    const rscript = (bin64 && fs.existsSync(path.join(bin64, 'Rscript.exe')))
+      ? path.join(bin64, 'Rscript.exe')
+      : (R_ROOT ? path.join(R_ROOT, 'bin', 'Rscript.exe') : 'Rscript.exe');
     return {
       rscript,
-      env: R_ROOT ? { R_HOME: R_ROOT, PATH: `${bin};${path.join(R_ROOT, 'bin')};${process.env.PATH || ''}` } : {},
+      env: R_ROOT ? {
+        R_HOME: R_ROOT,
+        PATH: [
+          bin64,
+          path.join(R_ROOT, 'bin'),
+          process.env.PATH || ''
+        ].filter(Boolean).join(';')
+      } : {}
     };
   }
 
   // linux
   {
-    const roots = [
+      const tryRoots = [
+      path.join(rp, 'R.linux'),
       path.join(rp, 'resources', 'R.linux'),
+      path.join(rp, 'R-Linux'),
       path.join(rp, 'resources', 'R-Linux'),
     ];
-    const R_ROOT = roots.find(fs.existsSync);
-    const bin = R_ROOT ? path.join(R_ROOT, 'bin') : null;
-    const rscript = bin ? path.join(bin, 'Rscript') : 'Rscript';
-        return {
-          rscript,
-          env: R_ROOT ? {
-            R_HOME: R_ROOT,
-            LD_LIBRARY_PATH: [
-              path.join(R_ROOT, 'lib'),
-              process.env.LD_LIBRARY_PATH || '',
-            ].filter(Boolean).join(':'),
-            PATH: `${bin}:${process.env.PATH || ''}`,
-          } : {},
-        };
-      }
+    const R_ROOT = tryRoots.find(fs.existsSync);
+    const bin    = R_ROOT ? path.join(R_ROOT, 'bin') : null;
+    const rscript = (bin && fs.existsSync(path.join(bin, 'Rscript')))
+      ? path.join(bin, 'Rscript')
+      : 'Rscript';
+    return {
+      rscript,
+      env: R_ROOT ? {
+        R_HOME: R_ROOT,
+        LD_LIBRARY_PATH: [
+          path.join(R_ROOT, 'lib'),
+          process.env.LD_LIBRARY_PATH || ''
+        ].filter(Boolean).join(':'),
+        PATH: [
+          bin,
+          process.env.PATH || ''
+        ].filter(Boolean).join(':')
+      } : {}
+    };
+
+  }
 }
 
 // ---------- single instance ----------
@@ -126,11 +142,23 @@ async function createWindow() {
   const host = '127.0.0.1';
   const port = Number(process.env.APP_PORT || 7777);
   const targetURL = `http://${host}:${port}`;
-  
-    // --- Stable locations we provide to R (no R code changes required) ---
+  // --- packaged code location ---
     const RESOURCES_DIR = process.resourcesPath;                  // .../Contents/Resources
     const APP_DIR       = path.join(RESOURCES_DIR, 'app');        // read-only bundled assets
-    const DATA_PARENT   = path.join(app.getPath('userData'), 'idep'); // writable per-user root
+  // --- prefer the folder the app was launched from (Terminal); fallback to userData when not writable ---
+  const LAUNCH_DIR = process.cwd();
+  const forceDir   = process.env.IDEP_DATA_DIR || process.env.IDEP_DATABASE; // explicit override if provided
+  function isWritableDir(p) {
+    try { fs.accessSync(p, fs.constants.W_OK); return fs.statSync(p).isDirectory(); } catch { return false; }
+  }
+  let DATA_PARENT;
+  if (forceDir) {
+    DATA_PARENT = path.resolve(forceDir);
+  } else if (LAUNCH_DIR && LAUNCH_DIR !== '/' && isWritableDir(LAUNCH_DIR)) {
+    DATA_PARENT = path.join(LAUNCH_DIR, 'idep'); // keep data next to where user launched from
+  } else {
+    DATA_PARENT = path.join(app.getPath('userData'), 'idep'); // ~/Library/Application Support/<AppName>/idep
+  }
     fs.mkdirSync(DATA_PARENT, { recursive: true });
   
   // locate run_app.R
@@ -156,11 +184,13 @@ async function createWindow() {
 
   log(`=== Launch ${new Date().toISOString()} ===`);
   log(`process.resourcesPath = ${RESOURCES_DIR}`);
-  log(`Rscript: ${rscript}`);
-  log(`run_app.R: ${rEntry}`);
-  log(`APP_DIR: ${APP_DIR}`);
-  log(`DATA_PARENT(user-writable): ${DATA_PARENT}`);
-  log(`targetURL: ${targetURL}`);
+  log(`LAUNCH_DIR = ${LAUNCH_DIR}`);
+  log(`DATA_PARENT (chosen) = ${DATA_PARENT}`);
+  if (forceDir) log(`(override) IDEP_DATA_DIR/IDEP_DATABASE = ${forceDir}`);
+  log(`APP_DIR = ${APP_DIR}`);
+  log(`Rscript = ${rscript}`);
+  log(`run_app.R = ${rEntry}`);
+  log(`targetURL = ${targetURL}`);
 
   // If your run_app.R accepts flags; otherwise switch to positional args
   const rArgs = [rEntry, '--port', String(port), '--host', host];
