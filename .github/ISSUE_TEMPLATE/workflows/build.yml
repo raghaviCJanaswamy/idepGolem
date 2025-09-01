@@ -2,7 +2,7 @@ name: Build all platforms
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
     paths:
       - 'electron/**'
       - '.github/workflows/build.yml'    
