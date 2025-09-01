@@ -3,6 +3,11 @@ name: Build all platforms
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'electron/**'
+      - '.github/workflows/build.yml'    
+  pull_request:
+    branches: [ main ]      
   workflow_dispatch:
 
 jobs:
@@ -20,7 +25,6 @@ jobs:
         with:
           name: mac-dist
           path: electron/dist/**
-
   build-win:
     runs-on: windows-latest
     defaults: { run: { working-directory: electron } }
