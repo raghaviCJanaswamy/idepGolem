@@ -11,20 +11,20 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-mac:
-    runs-on: macos-latest
-    defaults: { run: { working-directory: electron } }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: npm ci
-      # You already have resources/R.framework in repo or prepare it here
-      - run: npm run dist:mac
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mac-dist
-          path: electron/dist/**
+  # build-mac:
+  #   runs-on: macos-latest
+  #   defaults: { run: { working-directory: electron } }
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with: { node-version: 20 }
+  #     - run: npm ci
+  #     # You already have resources/R.framework in repo or prepare it here
+  #     - run: npm run dist:mac
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: mac-dist
+  #         path: electron/dist/**
   build-win:
     runs-on: windows-latest
     defaults: { run: { working-directory: electron } }
