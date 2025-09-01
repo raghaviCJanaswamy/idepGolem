@@ -27,25 +27,51 @@ jobs:
   #         path: electron/dist/**
   build-win:
     runs-on: windows-latest
-    defaults: { run: { working-directory: electron } }
+    defaults:
+      run:
+        working-directory: electron
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
-        with: { node-version: 20 }
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: electron/package-lock.json
+
+      # Install R and stage the portable runtime into resources/R.win
       - name: Install R (Windows)
-        run: choco install -y r  # or r.portable
         shell: powershell
-      - name: Stage R.win
+        run: choco install -y r
+
+      - name: Stage R.win runtime
         shell: powershell
         run: |
-          $r = (Get-ChildItem "C:\Program Files\R" | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          $r = Get-ChildItem "C:\Program Files\R" -Directory | Sort-Object Name -Descending | Select-Object -First 1
           if (-not $r) { throw "R not found under C:\Program Files\R" }
           New-Item -ItemType Directory -Force resources\R.win | Out-Null
-          Copy-Item "$r\*" resources\R.win -Recurse
-          if (-not (Test-Path "resources\R.win\bin\x64\Rscript.exe")) { throw "Rscript.exe not found in R.win\bin\x64" }
-      - run: npm ci
-      - run: npx electron-builder --win
-      - uses: actions/upload-artifact@v4
+          Copy-Item -Path "$($r.FullName)\*" -Destination resources\R.win -Recurse
+          if (-not (Test-Path "resources\R.win\bin\x64\Rscript.exe") -and -not (Test-Path "resources\R.win\bin\Rscript.exe")) {
+            throw "Rscript.exe not found in resources\R.win"
+          }
+
+      # Install deps (use ci if lockfile exists, otherwise install)
+      - name: Install Node dependencies
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) {
+            npm ci
+          } else {
+            npm install
+          }
+
+      - name: Build Windows artifacts
+        shell: pwsh
+        run: npx electron-builder --win
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
         with:
           name: win-dist
           path: electron/dist/**
