@@ -1,0 +1,167 @@
+name: mac-electron-build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "app/**"
+      - "resources/**"
+      - "main.js"
+      - "package.json"
+      - "package-lock.json"
+      - "yarn.lock"
+      - "pnpm-lock.yaml"
+
+concurrency:
+  group: mac-electron-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-mac:
+    name: Build mac (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple Silicon host → arm64 output
+            arch: arm64
+          - runner: macos-13   # Intel host → x64 output
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Optional signing/notarization (unsigned dev builds by default)
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ (secrets.APPLE_ID && secrets.MAC_CERT_P12_BASE64) && 'true' || 'false' }}
+
+      DEBUG: electron-builder
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+
+      # (Optional) cache paths for electron/electron-builder
+      ELECTRON_CACHE: $HOME/.cache/electron
+      ELECTRON_BUILDER_CACHE: $HOME/.cache/electron-builder
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Cache Electron caches (optional)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ELECTRON_CACHE }}
+            ${{ env.ELECTRON_BUILDER_CACHE }}
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json', 'yarn.lock', 'pnpm-lock.yaml') }}
+
+      - name: Show signing mode
+        run: |
+          if [[ "${CSC_IDENTITY_AUTO_DISCOVERY}" == "true" ]]; then
+            echo "🔐 Code signing & notarization ENABLED (secrets detected)."
+          else
+            echo "⚠️  Building UNSIGNED dev artifacts (no Apple secrets)."
+          fi
+
+      - name: Verify afterPack hook path
+        run: |
+          if grep -q '"afterPack"' package.json; then
+            if [ -f "scripts/afterPack-prune-lproj.js" ]; then
+              echo "✅ Found scripts/afterPack-prune-lproj.js"
+            else
+              echo "❗ afterPack file missing: scripts/afterPack-prune-lproj.js"
+              echo "   Your package.json references it; add the file or update the path."
+            fi
+          else
+            echo "ℹ️ No afterPack entry in package.json"
+          fi
+
+      - name: Install dependencies
+        run: |
+          npm config set fund false
+          npm ci
+
+      - name: Prepare R.framework (prepack & fix)
+        run: |
+          set -euo pipefail
+          # Your scripts:
+          #  - fix-rframework -> scripts/pre_build_fix_rframework.sh
+          #  - prepack -> scripts/prepare_r_framework.sh && scripts/verify_sources.sh
+          npm run fix-rframework
+          npm run prepack
+
+          # Best-effort: ensure Libraries dir exists for current R version (avoids rare packaging issues)
+          if [ -d "resources/R.framework" ]; then
+            cd resources/R.framework
+            CURR=$(readlink Versions/Current || ls Versions | sort -V | tail -n 1)
+            mkdir -p "Versions/${CURR}/Libraries"
+            echo "Ensured Libraries at Versions/${CURR}/Libraries"
+            cd - >/dev/null
+          fi
+
+      - name: Build (Electron / macOS ${{ matrix.arch }})
+        run: |
+          set -euo pipefail
+          echo "Electron $(npx --yes electron --version || true)"
+          echo "electron-builder $(npx --yes electron-builder --version || true)"
+
+          # Prefer your script that includes fix step:
+          #   "dist:mac": "npm run fix-rframework && electron-builder --mac"
+          if npm run -s dist:mac --if-present; then
+            echo "✅ Ran npm run dist:mac"
+          # Fallback to "dist:mac-build": "npm run build --mac" (doesn't run fix, but we ran it above)
+          elif npm run -s dist:mac-build --if-present; then
+            echo "✅ Ran npm run dist:mac-build"
+          else
+            echo "No dist:mac* scripts found; calling electron-builder directly."
+            npx electron-builder --mac
+          fi
+
+      - name: Post-build check
+        if: always()
+        run: |
+          # Your post-build sanity script if present
+          npm run -s post-build-check --if-present || true
+
+      - name: List dist/
+        if: always()
+        run: |
+          echo "=== dist contents ==="
+          ls -R1 dist || true
+
+      - name: Upload artifacts (DMG/ZIP/.app)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.arch }}-dist
+          path: |
+            dist/**/*.dmg
+            dist/**/*.zip
+            dist/**/*.app
+            dist/*.yml
+            dist/*.blockmap
+          if-no-files-found: warn
+
+      - name: Upload electron-builder logs (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.arch }}-logs
+          path: |
+            *.log
+            dist/*.log
+          if-no-files-found: ignore
