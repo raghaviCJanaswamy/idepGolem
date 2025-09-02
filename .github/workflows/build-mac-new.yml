@@ -3,18 +3,14 @@ name: mac-electron-build
 on:
   workflow_dispatch:
   push:
-    tags:
-      - "v*"
+    branches: [ "gitac"]
   pull_request:
     paths:
       - "scripts/**"
       - "app/**"
       - "resources/**"
       - "main.js"
-      - "package.json"
-      - "package-lock.json"
-      - "yarn.lock"
-      - "pnpm-lock.yaml"
+      - "package.json"   # lockfile-free
 
 concurrency:
   group: mac-electron-build-${{ github.ref }}
@@ -27,16 +23,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14   # Apple Silicon host → arm64 output
+          - runner: macos-14   # Apple Silicon host → arm64
             arch: arm64
-          - runner: macos-13   # Intel host → x64 output
+          - runner: macos-13   # Intel host → x64
             arch: x64
     runs-on: ${{ matrix.runner }}
 
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Optional signing/notarization (unsigned dev builds by default)
+      # Optional signing/notarization (unsigned by default)
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -48,7 +44,6 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: 1
       HOMEBREW_NO_INSTALL_CLEANUP: 1
 
-      # (Optional) cache paths for electron/electron-builder
       ELECTRON_CACHE: $HOME/.cache/electron
       ELECTRON_BUILDER_CACHE: $HOME/.cache/electron-builder
 
@@ -56,11 +51,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Show workspace layout (debug)
+        run: |
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          find . -maxdepth 2 -type f -name package.json -print
+
+      - name: Detect project directory (folder with package.json)
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidates=( "." "idep-golem-package" "electron" "app" )
+          proj=""
+          for d in "${candidates[@]}"; do
+            if [ -f "$d/package.json" ]; then proj="$d"; break; fi
+          done
+          if [ -z "$proj" ]; then
+            # Fall back to first package.json found outside node_modules
+            proj="$(git ls-files | grep -E '/?package\.json$' | grep -v node_modules | head -n1 | xargs -I{} dirname {} || true)"
+          fi
+          if [ -z "$proj" ] || [ ! -f "$proj/package.json" ]; then
+            echo "❌ No package.json found. Ensure your Electron project is committed."
+            exit 1
+          fi
+          echo "PROJECT_DIR=$proj" >> "$GITHUB_ENV"
+          echo "Detected project dir: $proj"
+
       - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
+
+      # Lockfile-free caches
+      - name: Cache npm (no lockfile)
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package.json') }}
 
       - name: Cache Electron caches (optional)
         uses: actions/cache@v4
@@ -68,7 +95,7 @@ jobs:
           path: |
             ${{ env.ELECTRON_CACHE }}
             ${{ env.ELECTRON_BUILDER_CACHE }}
-          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json', 'yarn.lock', 'pnpm-lock.yaml') }}
+          key: electron-${{ runner.os }}-${{ hashFiles('**/package.json') }}
 
       - name: Show signing mode
         run: |
@@ -79,6 +106,7 @@ jobs:
           fi
 
       - name: Verify afterPack hook path
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if grep -q '"afterPack"' package.json; then
             if [ -f "scripts/afterPack-prune-lproj.js" ]; then
@@ -91,40 +119,33 @@ jobs:
             echo "ℹ️ No afterPack entry in package.json"
           fi
 
-      - name: Install dependencies
+      - name: Install dependencies (no lockfile)
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           npm config set fund false
-          npm ci
+          npm install --no-audit --no-fund
 
       - name: Prepare R.framework (prepack & fix)
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
-          # Your scripts:
-          #  - fix-rframework -> scripts/pre_build_fix_rframework.sh
-          #  - prepack -> scripts/prepare_r_framework.sh && scripts/verify_sources.sh
           npm run fix-rframework
           npm run prepack
-
-          # Best-effort: ensure Libraries dir exists for current R version (avoids rare packaging issues)
           if [ -d "resources/R.framework" ]; then
             cd resources/R.framework
             CURR=$(readlink Versions/Current || ls Versions | sort -V | tail -n 1)
             mkdir -p "Versions/${CURR}/Libraries"
             echo "Ensured Libraries at Versions/${CURR}/Libraries"
-            cd - >/dev/null
           fi
 
       - name: Build (Electron / macOS ${{ matrix.arch }})
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
           echo "Electron $(npx --yes electron --version || true)"
           echo "electron-builder $(npx --yes electron-builder --version || true)"
-
-          # Prefer your script that includes fix step:
-          #   "dist:mac": "npm run fix-rframework && electron-builder --mac"
           if npm run -s dist:mac --if-present; then
             echo "✅ Ran npm run dist:mac"
-          # Fallback to "dist:mac-build": "npm run build --mac" (doesn't run fix, but we ran it above)
           elif npm run -s dist:mac-build --if-present; then
             echo "✅ Ran npm run dist:mac-build"
           else
@@ -134,12 +155,13 @@ jobs:
 
       - name: Post-build check
         if: always()
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          # Your post-build sanity script if present
           npm run -s post-build-check --if-present || true
 
       - name: List dist/
         if: always()
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           echo "=== dist contents ==="
           ls -R1 dist || true
@@ -149,11 +171,11 @@ jobs:
         with:
           name: mac-${{ matrix.arch }}-dist
           path: |
-            dist/**/*.dmg
-            dist/**/*.zip
-            dist/**/*.app
-            dist/*.yml
-            dist/*.blockmap
+            ${{ env.PROJECT_DIR }}/dist/**/*.dmg
+            ${{ env.PROJECT_DIR }}/dist/**/*.zip
+            ${{ env.PROJECT_DIR }}/dist/**/*.app
+            ${{ env.PROJECT_DIR }}/dist/*.yml
+            ${{ env.PROJECT_DIR }}/dist/*.blockmap
           if-no-files-found: warn
 
       - name: Upload electron-builder logs (if any)
@@ -162,6 +184,6 @@ jobs:
         with:
           name: mac-${{ matrix.arch }}-logs
           path: |
-            *.log
-            dist/*.log
+            ${{ env.PROJECT_DIR }}/*.log
+            ${{ env.PROJECT_DIR }}/dist/*.log
           if-no-files-found: ignore
