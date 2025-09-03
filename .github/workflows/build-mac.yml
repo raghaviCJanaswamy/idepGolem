@@ -23,19 +23,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14   # Apple Silicon
+          - runner: macos-14
             arch: arm64
-          - runner: macos-13   # Intel
+          - runner: macos-13
             arch: x64
     runs-on: ${{ matrix.runner }}
 
     env:
-      PROJECT_DIR: .          # set to your subfolder if not repo root (e.g., idep-golem-package)
+      # Set this to your subfolder if not repo root (e.g., idep-golem-package)
+      PROJECT_DIR: .
       R_VERSION: "4.4.1"
-      EMBED_R: "true"         # set to "false" to skip embedding R.framework (dev-only)
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Optional signing (leave secrets empty for unsigned dev builds)
+      # (Optional) signing secrets; leave empty for unsigned dev builds
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -62,9 +62,8 @@ jobs:
         with:
           node-version: "20"
 
-      # Install R so /Library/Frameworks/R.framework exists on the runner
+      # Install R on the macOS runner (so /Library/Frameworks/R.framework exists)
       - name: Setup R ${{ env.R_VERSION }}
-        if: env.EMBED_R == 'true'
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: ${{ env.R_VERSION }}
@@ -75,67 +74,29 @@ jobs:
           npm config set fund false
           npm install --no-audit --no-fund
 
-      # ----- R.framework prep & verify -----
-
-      # Try your repo script first, otherwise do an inline copy
-      - name: Prepare embedded R.framework
-        if: env.EMBED_R == 'true'
+      # Make sure the script is executable, then run it
+      - name: Prepare embedded R.framework (flattened)
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f scripts/prepare_r_framework.sh ]; then
-            echo "Using repo script: scripts/pre_build_fix_rframework.sh"
-            bash scripts/pre_build_fix_rframework.sh
-          else
-            echo "Repo script not found; running inline fallback…"
-            SRC="/Library/Frameworks/R.framework"
-            DEST="resources/R.framework"
-            if [ ! -d "$SRC" ]; then
-              echo "❌ $SRC not found. Did setup-r run?"
-              exit 1
-            fi
-            rm -rf "$DEST"
-            mkdir -p resources
-            # Preserve symlinks/attrs
-            rsync -a "$SRC/" "$DEST/"
+          chmod +x scripts/pre_build_fix_rframework.sh || true
+          bash scripts/pre_build_fix_rframework.sh
 
-            # Ensure Libraries dir & top-level symlinks exist
-            pushd "$DEST" >/dev/null
-            CURR=$(readlink Versions/Current || ls Versions | sort -V | tail -n 1)
-            mkdir -p "Versions/$CURR/Libraries"
-            for ITEM in Headers Resources PrivateHeaders Libraries; do
-              [ -e "$ITEM" ] || ln -s "Versions/$CURR/$ITEM" "$ITEM" || true
-            done
-            popd >/dev/null
-          fi
-
-      - name: Verify R.framework
-        if: env.EMBED_R == 'true'
+      # Verify the flattened layout produced by your script
+      - name: Verify R.framework (flattened)
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f scripts/verify_sources.sh ]; then
-            bash scripts/verify_sources.sh
+          RFW="resources/R.framework"
+          [ -d "$RFW/Resources" ] || (echo "❌ $RFW/Resources missing" && exit 1)
+          if [ -x "$RFW/Resources/bin/Rscript" ]; then
+            echo "✅ Found Rscript at Resources/bin/Rscript"
+          elif [ -x "$RFW/Resources/Rscript" ]; then
+            echo "✅ Found Rscript at Resources/Rscript"
           else
-            # inline verify
-            RFW="resources/R.framework"
-            [ -d "$RFW" ] || (echo "❌ R.framework missing" && exit 1)
-            CURR=$(cd "$RFW" && (readlink Versions/Current || ls Versions | sort -V | tail -n 1))
-            test -x "$RFW/Resources/bin/Rscript"
-            test -d "$RFW/Versions/$CURR/Libraries"
-            echo "✅ R.framework OK (version $CURR)"
-          fi
-
-      # ----- Build -----
-
-      - name: Warn if afterPack script path missing
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          if grep -q '"afterPack"' package.json; then
-            test -f scripts/afterPack-prune-lproj.js || echo "⚠️ afterPack script not found at scripts/afterPack-prune-lproj.js"
+            echo "❌ Rscript not found in flattened framework"; ls -la "$RFW/Resources" || true; exit 1
           fi
 
       - name: Build (macOS ${{ matrix.arch }})
