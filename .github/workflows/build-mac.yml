@@ -92,6 +92,39 @@ jobs:
           fi
           echo "origin => $(git config --get remote.origin.url || echo '(none)')"
 
+      # Ensure R is installed and discoverable
+      - name: Install/verify R
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          have_r() { command -v R >/dev/null 2>&1; }
+      
+          echo "🔎 Checking R…"
+          if ! have_r; then
+            echo "R not found → installing via Homebrew cask (CRAN build with R.framework)…"
+            brew update || true
+            brew install --cask r || true
+          fi
+      
+          if ! have_r; then
+            echo "Cask install didn’t yield R on PATH → installing Homebrew formula (lib/R layout)…"
+            brew install r || true
+          fi
+      
+          if ! have_r; then
+            echo "❌ Could not install R"; exit 1
+          fi
+      
+          echo "✅ R is on PATH"
+          R --version || true
+          echo "RHOME = $(R RHOME || true)"
+      
+          echo "--- /Library/Frameworks ---"
+          ls -la /Library/Frameworks || true
+
+
+
       # Prepare embedded R.framework using your script (electron/scripts/pre_build_fix_rframework.sh)
       - name: Prepare embedded R.framework (flatten)
         working-directory: ${{ env.PROJECT_DIR }}
