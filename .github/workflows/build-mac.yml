@@ -27,27 +27,22 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     env:
-      PROJECT_DIR: electron
+      PROJECT_DIR: electron          # your app lives here
       R_VERSION: "4.4.1"
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Signing defaults OFF; the guard step may enable it if secrets are valid
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
-      CSC_LINK: ""
-      CSC_KEY_PASSWORD: ""
-      APPLE_ID: ""
-      APPLE_APP_SPECIFIC_PASSWORD: ""
-      APPLE_TEAM_ID: ""
-      # (Optional) signing; leave empty for unsigned dev builds
-      # APPLE_ID: ${{ secrets.APPLE_ID }}
-      # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      # CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}
-      # CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-      # CSC_IDENTITY_AUTO_DISCOVERY: ${{ (secrets.APPLE_ID && secrets.MAC_CERT_P12_BASE64) && 'true' || 'false' }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}        # base64 or path; guard step handles it
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0     # good hygiene for git metadata
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -59,13 +54,31 @@ jobs:
         with:
           r-version: ${{ env.R_VERSION }}
 
+      # Fallback if the framework isn't there (rare)
+      - name: Ensure R.framework exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v R >/dev/null 2>&1 || [ ! -d /Library/Frameworks/R.framework ]; then
+            echo "Installing R via Homebrew cask as fallback…"
+            brew update || true
+            brew install --cask r
+          fi
+          echo "--- R version ---"
+          R --version
+          echo "--- RHOME ---"
+          R RHOME || true
+          echo "--- /Library/Frameworks ---"
+          ls -la /Library/Frameworks || true
+          test -d /Library/Frameworks/R.framework
+
       - name: Install deps (no lockfile)
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           npm config set fund false
           npm install --no-audit --no-fund
 
-      # >>> Option C: ensure a lightweight git repo inside electron/ so electron-builder sees .git/config
+      # Ensure electron/ has a .git so electron-builder can read repo info
       - name: Ensure git repo metadata for electron-builder
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -79,7 +92,7 @@ jobs:
           fi
           echo "origin => $(git config --get remote.origin.url || echo '(none)')"
 
-      # Prepare embedded R.framework using your script in electron/scripts/
+      # Prepare embedded R.framework using your script (electron/scripts/pre_build_fix_rframework.sh)
       - name: Prepare embedded R.framework (flatten)
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -96,21 +109,64 @@ jobs:
           RFW="resources/R.framework"
           [ -d "$RFW/Resources" ]
           if [ -x "$RFW/Resources/bin/Rscript" ] || [ -x "$RFW/Resources/Rscript" ]; then
-            echo "✅ Rscript exists in flattened framework"
+            echo "✅ Rscript present in flattened framework"
           else
             echo "❌ Rscript missing in $RFW/Resources"; ls -la "$RFW/Resources" || true; exit 1
+          fi
+
+      # Optional checks for paths declared in package.json
+      - name: Verify afterPack & entitlements paths
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q '"afterPack"' package.json; then
+            test -f scripts/afterPack-prune-lproj.js || echo "⚠️ afterPack script missing: electron/scripts/afterPack-prune-lproj.js"
+          fi
+          ent=$(node -e "p=require('./package.json');console.log((p.build&&p.build.mac&&p.build.mac.entitlements)||'')")
+          [ -z "$ent" ] || [ -f "$ent" ] || { echo "❌ Missing entitlements file: $ent"; exit 1; }
+          entInh=$(node -e "p=require('./package.json');console.log((p.build&&p.build.mac&&p.build.mac.entitlementsInherit)||'')")
+          [ -z "$entInh" ] || [ -f "$entInh" ] || { echo "❌ Missing entitlementsInherit file: $entInh"; exit 1; }
+
+      # Guard signing: if secrets are valid base64, decode to a temp .p12 and enable signing; else keep unsigned
+      - name: Prepare signing (guard)
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # If CSC_LINK points to a real path, keep it
+          if [ -n "${CSC_LINK:-}" ] && [ -e "${CSC_LINK}" ]; then
+            echo "CSC_LINK is a local path"
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> $GITHUB_ENV
+            exit 0
+          fi
+          # If non-empty but not a path, try base64 decode
+          if [ -n "${CSC_LINK:-}" ]; then
+            echo "Decoding CSC_LINK (base64) → /tmp/cert.p12"
+            node -e "require('fs').writeFileSync('/tmp/cert.p12', Buffer.from(process.env.CSC_LINK,'base64'))"
+            if [ -s /tmp/cert.p12 ]; then
+              echo "CSC_LINK=file:///tmp/cert.p12" >> $GITHUB_ENV
+              echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> $GITHUB_ENV
+            else
+              echo "Decoded cert empty; disabling signing."
+              echo "CSC_LINK=" >> $GITHUB_ENV
+              echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> $GITHUB_ENV
+            fi
+          else
+            echo "No CSC_LINK provided; signing remains disabled."
           fi
 
       - name: Build (macOS ${{ matrix.arch }})
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
+          # Prefer your script if it exists; otherwise call electron-builder
           if npm run -s dist:mac --if-present; then
             echo "Ran npm run dist:mac"
           elif npm run -s dist:mac-build --if-present; then
             echo "Ran npm run dist:mac-build"
           else
-            npx electron-builder --mac --${{ matrix.arch }} --publish=never
+            npx electron-builder --mac --${{ matrix.arch }}
           fi
 
       - name: Upload artifacts
