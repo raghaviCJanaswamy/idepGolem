@@ -1,79 +1,122 @@
-# name: Build macOS (Electron)
+name: build-mac
 
-# on:
-#   push:
-#     branches: [ master ]
-#     paths:
-#       - 'electron/**'
-#       - '.github/workflows/build-mac.yml'
-#   workflow_dispatch:
+on:
+  workflow_dispatch:
+  push:
+    branches: ["gitac"]
+  pull_request:
+    paths:
+      - "**/scripts/**"
+      - "**/app/**"
+      - "**/resources/**"
+      - "**/main.js"
+      - "**/package.json"
 
-# jobs:
-#   build-mac:
-#     runs-on: macos-latest
-#     defaults:
-#       run:
-#         working-directory: electron
+concurrency:
+  group: build-mac-${{ github.ref }}
+  cancel-in-progress: true
 
-#     steps:
-#       - name: Checkout
-#         uses: actions/checkout@v4
+jobs:
+  mac:
+    name: mac (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple Silicon
+            arch: arm64
+          - runner: macos-13   # Intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
 
-#       - name: Setup Node
-#         uses: actions/setup-node@v4
-#         with:
-#           node-version: 20
-#           # Uncomment after committing electron/package-lock.json:
-#           # cache: npm
-#           # cache-dependency-path: electron/package-lock.json
+    env:
+      # If your Electron project lives in a subfolder, hardcode it here (e.g., "idep-golem-package").
+      PROJECT_DIR: .
+      R_VERSION: "4.4.1"             # Pin R used to prepare R.framework (optional)
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-#       # Install R on macOS (provides /Library/Frameworks/R.framework)
-#       - name: Setup R
-#         uses: r-lib/actions/setup-r@v2
-#         with:
-#           r-version: 'release'
+      # Optional signing (leave secrets empty for unsigned dev builds)
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ (secrets.APPLE_ID && secrets.MAC_CERT_P12_BASE64) && 'true' || 'false' }}
 
-#       # Copy /Library/Frameworks/R.framework into electron/resources
-#       - name: Stage R.framework into resources
-#         run: |
-#           set -euo pipefail
-#           if [ ! -d "/Library/Frameworks/R.framework" ]; then
-#             echo "R.framework missing at /Library/Frameworks"; exit 1
-#           fi
-#           mkdir -p resources
-#           rsync -a "/Library/Frameworks/R.framework" "resources/"
-#           # If you have a flattener, run it (optional)
-#           if npm run | grep -q 'fix-rframework'; then
-#             npm run fix-rframework
-#           fi
-#           # Sanity: Rscript present
-#           test -x resources/R.framework/Resources/bin/Rscript || \
-#             test -x resources/R.framework/Resources/Rscript
+    steps:
+      - uses: actions/checkout@v4
 
-#       # Optional: ensure afterPack hook path won’t break the build
-#       - name: Verify afterPack hook (optional)
-#         run: |
-#           node -e "const p=require('./package.json'); console.log('afterPack=', p.build && p.build.afterPack)"
-#           test -f scripts/afterPack-prune-lproj.js && echo "afterPack script exists" || echo "no afterPack script (ok)"
+      # Auto-detect project dir if PROJECT_DIR isn't right
+      - name: Detect project directory
+        if: env.PROJECT_DIR == '.'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for d in "." "idep-golem-package" "electron" "app"; do
+            if [ -f "$d/package.json" ]; then echo "PROJECT_DIR=$d" >> "$GITHUB_ENV"; exit 0; fi
+          done
+          found="$(git ls-files | grep -E '/?package\.json$' | grep -v node_modules | head -n1 || true)"
+          [ -n "$found" ] && echo "PROJECT_DIR=$(dirname "$found")" >> "$GITHUB_ENV" || (echo "No package.json found" && exit 1)
 
-#       - name: Install Node dependencies
-#         run: |
-#           if [ -f package-lock.json ]; then
-#             npm ci
-#           else
-#             echo "No package-lock.json found; using npm install"
-#             npm install
-#           fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-#       # Use your script exactly: "dist:mac-build": "npm run build --mac"
-#       - name: Build (npm run dist:mac-build)
-#         env:
-#           # Avoid accidental signing prompts/timeouts in CI
-#           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-#         run: npm run dist:mac-build
+      # Install R on the macOS runner so your prepare script can copy R.framework (optional)
+      - name: Setup R ${{ env.R_VERSION }}
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ env.R_VERSION }}
 
-#       - name: Upload dist artifacts
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: mac-dist
-#           path: electron/dist/**
+      - name: Install deps
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm config set fund false
+          npm install --no-audit --no-fund
+
+      # Optional: prepare R.framework if your repo provides scripts (safe no-op if absent)
+      - name: Prepare embedded R.framework (optional)
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/prepare_r_framework.sh ]; then bash scripts/prepare_r_framework.sh; else echo "skip prepare_r_framework.sh"; fi
+          if [ -f scripts/verify_sources.sh ]; then bash scripts/verify_sources.sh; else echo "skip verify_sources.sh"; fi
+          if [ -d resources/R.framework ]; then
+            cd resources/R.framework
+            CURR=$(readlink Versions/Current || ls Versions | sort -V | tail -n 1)
+            mkdir -p "Versions/${CURR}/Libraries"
+          fi
+
+      # Optional: warn if afterPack script path from package.json is missing
+      - name: Verify afterPack hook path (optional)
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          if grep -q '"afterPack"' package.json; then
+            test -f scripts/afterPack-prune-lproj.js || echo "⚠️ afterPack script not found at scripts/afterPack-prune-lproj.js"
+          fi
+
+      - name: Build (macOS ${{ matrix.arch }})
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          if npm run -s dist:mac --if-present; then
+            echo "Ran npm run dist:mac"
+          elif npm run -s dist:mac-build --if-present; then
+            echo "Ran npm run dist:mac-build"
+          else
+            npx electron-builder --mac --${{ matrix.arch }}
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.arch }}-dist
+          path: |
+            ${{ env.PROJECT_DIR }}/dist/**/*.dmg
+            ${{ env.PROJECT_DIR }}/dist/**/*.zip
+            ${{ env.PROJECT_DIR }}/dist/**/*.app
+            ${{ env.PROJECT_DIR }}/dist/*.yml
+            ${{ env.PROJECT_DIR }}/dist/*.blockmap
+          if-no-files-found: warn
