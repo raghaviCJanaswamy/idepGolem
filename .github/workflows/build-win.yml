@@ -1,73 +1,83 @@
-# name: Build Windows (Electron)
-# on:
-#   push:
-#     branches: [ gitac ]            # change if your default branch is different
-#     paths:
-#       - 'electron/**'
-#       - '.github/workflows/build-win.yml'
-#   workflow_dispatch:              # allow manual runs from the Actions tab
+name: build-windows
 
-# jobs:
-#   build-win:
-#     runs-on: windows-latest
-#     defaults:
-#       run:
-#         working-directory: electron   # your electron/ subfolder
+on:
+  workflow_dispatch:
+  push:
+    branches: ["gitac"]        # change if your default branch differs
+  pull_request:
+    paths:
+      - "electron/**"
+      - ".github/workflows/build-win.yml"
 
-#     steps:
-#       - name: Checkout
-#         uses: actions/checkout@v4
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
 
-#       - name: Setup Node
-#         uses: actions/setup-node@v4
-#         with:
-#           node-version: 20
-#           # cache: npm
-#           # cache-dependency-path: electron/package-lock.json
+jobs:
+  windows:
+    name: windows x64
+    runs-on: windows-latest
 
-#       # Install R and stage a portable runtime under electron/resources/R.win
-#       - name: Install R (Chocolatey)
-#         shell: powershell
-#         run: choco install -y r
+    env:
+      PROJECT_DIR: electron
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-#       - name: Stage R.win runtime for packaging
-#         shell: powershell
-#         run: |
-#           $r = Get-ChildItem "C:\Program Files\R" -Directory |
-#                Sort-Object Name -Descending | Select-Object -First 1
-#           if (-not $r) { throw "R not found under C:\Program Files\R" }
-#           Write-Host "Using R from: $($r.FullName)"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-#           New-Item -ItemType Directory -Force resources\R.win | Out-Null
-#           Copy-Item -Path "$($r.FullName)\*" -Destination resources\R.win -Recurse
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-#           # sanity check
-#           if (-not (Test-Path "resources\R.win\bin\x64\Rscript.exe") -and
-#               -not (Test-Path "resources\R.win\bin\Rscript.exe")) {
-#             throw "Rscript.exe not found in resources\R.win"
-#           }
+      - name: Install deps (no lockfile)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm config set fund false
+          npm install --no-audit --no-fund
 
-#       - name: Install Node dependencies
-#         shell: pwsh
-#         run: |
-#           if (Test-Path package-lock.json) {
-#             npm ci
-#           } else {
-#             echo "No package-lock.json found; using npm install"
-#             npm install
-#           }
+      # Ensure electron/ has a .git so electron-builder can read repo info
+      - name: Ensure git metadata for electron-builder
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: pwsh
+        run: |
+          if (!(Test-Path ".git")) {
+            git init
+            git remote add origin "https://github.com/${{ github.repository }}.git"
+            git config user.email "actions@users.noreply.github.com"
+            git config user.name  "github-actions[bot]"
+          }
+          git config --get remote.origin.url
 
-#       # Build Windows artifacts (uses your electron/build config)
-#       - name: Build (electron-builder --win)
-#         shell: pwsh
-#         env:
-#           # avoid accidental signing prompts
-#           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-#         run: npx electron-builder --win
+      # Force unsigned build: clear any possible signing env
+      - name: Force unsigned env (Windows)
+        shell: pwsh
+        run: |
+          Remove-Item Env:CSC_LINK -ErrorAction SilentlyContinue
+          Remove-Item Env:CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
+          Remove-Item Env:WIN_CSC_LINK -ErrorAction SilentlyContinue
+          Remove-Item Env:APPLE_ID,Env:APPLE_APP_SPECIFIC_PASSWORD,Env:APPLE_TEAM_ID -ErrorAction SilentlyContinue
+          $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
 
-#       # Upload everything under electron/dist/
-#       - name: Upload dist artifacts
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: win-dist
-#           path: electron/dist/**
+      - name: Build (Windows)
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: pwsh
+        run: |
+          if (npm run -s dist:win --if-present) {
+            # your script already calls electron-builder
+          } else {
+            npx electron-builder --win --publish=never
+          }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: |
+            ${{ env.PROJECT_DIR }}/dist/**/*.exe
+            ${{ env.PROJECT_DIR }}/dist/**/*.msi
+            ${{ env.PROJECT_DIR }}/dist/**/*.zip
+            ${{ env.PROJECT_DIR }}/dist/*.yml
+            ${{ env.PROJECT_DIR }}/dist/*.blockmap
+          if-no-files-found: warn

@@ -1,73 +1,89 @@
-# name: Build Linux (Electron)
+name: build-linux
 
-# on:
-#   push:
-#     branches: [ master ]                 # change if your default branch differs
-#     paths:
-#       - 'electron/**'
-#       - '.github/workflows/build-linux.yml'
-#   workflow_dispatch:
+on:
+  workflow_dispatch:
+  push:
+    branches: ["gitac"]       
+  pull_request:
+    paths:
+      - "electron/**"
+      - ".github/workflows/build-linux.yml"
 
-# jobs:
-#   build-linux:
-#     runs-on: ubuntu-latest
-#     defaults:
-#       run:
-#         working-directory: electron      # your electron/ subfolder
+concurrency:
+  group: build-linux-${{ github.ref }}
+  cancel-in-progress: true
 
-#     steps:
-#       - name: Checkout
-#         uses: actions/checkout@v4
+jobs:
+  linux:
+    name: linux x64
+    runs-on: ubuntu-latest
 
-#       - name: Setup Node
-#         uses: actions/setup-node@v4
-#         with:
-#           node-version: 20
-#           # Re-enable cache after you commit electron/package-lock.json:
-#           # cache: npm
-#           # cache-dependency-path: electron/package-lock.json
+    env:
+      PROJECT_DIR: electron
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-#       # Install R and stage a portable runtime under electron/resources/R.linux
-#       - name: Install R (Ubuntu)
-#         run: |
-#           set -euo pipefail
-#           sudo apt-get update
-#           sudo apt-get install -y r-base
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-#       - name: Stage R.linux runtime for packaging
-#         run: |
-#           set -euo pipefail
-#           RHOME=$(R RHOME)
-#           echo "RHOME=$RHOME"
-#           mkdir -p resources/R.linux
-#           # copy the whole R tree (bin, lib, etc.)
-#           cp -a "$RHOME/." resources/R.linux/
-#           # sanity checks
-#           test -x resources/R.linux/bin/Rscript
-#           ls -al resources/R.linux/bin || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-#       # (Optional) Verify afterPack hook presence/value to avoid path typos
-#       - name: Verify afterPack hook (optional)
-#         run: |
-#           node -e "const p=require('./package.json'); console.log('afterPack=', p.build && p.build.afterPack)"
-#           test -f scripts/afterPack-prune-lproj.js && echo "afterPack script exists" || echo "no afterPack script (ok)"
+      # Useful packaging tools (rpm for .rpm, fakeroot helpful for .deb)
+      - name: Install packaging prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y rpm fakeroot
 
-#       - name: Install Node dependencies
-#         run: |
-#           if [ -f package-lock.json ]; then
-#             npm ci
-#           else
-#             echo "No package-lock.json found; using npm install"
-#             npm install
-#           fi
+      - name: Install deps (no lockfile)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm config set fund false
+          npm install --no-audit --no-fund
 
-#       - name: Build (electron-builder --linux)
-#         env:
-#           CSC_IDENTITY_AUTO_DISCOVERY: "false"   # no codesign on Linux
-#         run: npx electron-builder --linux
+      # Ensure electron/ has a .git so electron-builder can read repo info
+      - name: Ensure git metadata for electron-builder
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d ".git" ]; then
+            git init
+            git remote add origin "https://github.com/${{ github.repository }}.git"
+            git config user.email "actions@users.noreply.github.com"
+            git config user.name  "github-actions[bot]"
+          fi
+          git config --get remote.origin.url || true
 
-#       - name: Upload dist artifacts
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: linux-dist
-#           path: electron/dist/**
+      # Force unsigned build: clear any possible signing env
+      - name: Force unsigned env (Linux)
+        shell: bash
+        run: |
+          unset CSC_LINK CSC_KEY_PASSWORD WIN_CSC_LINK APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+          export CSC_IDENTITY_AUTO_DISCOVERY=false
+
+      - name: Build (Linux)
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if npm run -s dist:linux --if-present; then
+            :
+          else
+            npx electron-builder --linux --publish=never
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: |
+            ${{ env.PROJECT_DIR }}/dist/**/*.AppImage
+            ${{ env.PROJECT_DIR }}/dist/**/*.deb
+            ${{ env.PROJECT_DIR }}/dist/**/*.rpm
+            ${{ env.PROJECT_DIR }}/dist/**/*.zip
+            ${{ env.PROJECT_DIR }}/dist/*.yml
+            ${{ env.PROJECT_DIR }}/dist/*.blockmap
+          if-no-files-found: warn

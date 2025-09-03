@@ -2,7 +2,7 @@ name: build-mac
 on:
   workflow_dispatch:
   push:
-    branches: [" gitac "]            # change if your default branch differs
+    branches: [ gitac  ]        # change if your default branch differs
   pull_request:
     paths: ["electron/**", ".github/workflows/build-mac.yml"]
 
@@ -30,11 +30,18 @@ jobs:
 
       # Signing OFF by default; guard step may enable if secrets are good
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}        # base64 or path; guard handles it
-      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      CSC_LINK: ""
+      CSC_KEY_PASSWORD: ""
+      APPLE_ID: ""
+      APPLE_APP_SPECIFIC_PASSWORD: ""
+      APPLE_TEAM_ID: ""
+
+    #   CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    #   APPLE_ID: ${{ secrets.APPLE_ID }}
+    #   APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+    #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    #   CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}        # base64 or path; guard handles it
+    #   CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v4
@@ -78,7 +85,7 @@ jobs:
 
       # Prepare embedded R runtime (handles Framework or brew lib/R)
       - name: Prepare embedded R.framework
-        working-directory: ${{ env.PROJECT_DIR }}
+        working-directory: electron
         shell: bash
         run: |
           set -euo pipefail
@@ -86,55 +93,131 @@ jobs:
           bash scripts/pre_build_fix_rframework.sh
 
       - name: Verify R runtime
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
+        working-directory: electron   # PROJECT_DIR: electron
+        env:
+            PROJECT_DIR: .
+            REQUIRE_RUN_APP: "0"   # flip to "1" if you want this to be mandatory
         run: |
-          set -euo pipefail
-          bash scripts/verify_r_runtime.sh
+            bash scripts/verify_sources.sh
+
 
       # Validate afterPack & entitlements paths
       - name: Verify package paths
-        working-directory: ${{ env.PROJECT_DIR }}
+        working-directory: electron
         shell: bash
         run: |
           set -euo pipefail
           test -f scripts/afterPack-prune-lproj.js || echo "⚠️ afterPack missing"
           test -f entitlements.mac.plist || { echo "❌ entitlements.mac.plist missing"; exit 1; }
 
-      # Enable signing if cert secret is valid base64 or a real path
-      - name: Prepare signing (guard)
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: where is CSC_LINK pointing?
+        working-directory: electron
         shell: bash
         run: |
-          set -euo pipefail
-          if [ -n "${CSC_LINK:-}" ] && [ -e "${CSC_LINK}" ]; then
-            echo "CSC_LINK is a path; enabling signing"
-            echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> $GITHUB_ENV
-            exit 0
-          fi
-          if [ -n "${CSC_LINK:-}" ]; then
-            node -e "require('fs').writeFileSync('/tmp/cert.p12', Buffer.from(process.env.CSC_LINK,'base64'))"
-            if [ -s /tmp/cert.p12 ]; then
-              echo "CSC_LINK=file:///tmp/cert.p12" >> $GITHUB_ENV
-              echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> $GITHUB_ENV
-            else
-              echo "Bad CSC_LINK base64; leaving signing disabled"
-              echo "CSC_LINK=" >> $GITHUB_ENV
-              echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> $GITHUB_ENV
+            set -euo pipefail
+            echo "CSC_LINK set? ${CSC_LINK:+yes}" 
+            if [ -n "${CSC_LINK:-}" ]; then
+            [ -d "${CSC_LINK}" ] && echo "CSC_LINK is a DIRECTORY: ${CSC_LINK}"
+            [ -f "${CSC_LINK}" ] && echo "CSC_LINK is a FILE: ${CSC_LINK}"
+            [ ! -e "${CSC_LINK}" ] && echo "CSC_LINK not a path; likely a base64 string"
             fi
-          fi
 
-      - name: Build (macOS ${{ matrix.arch }})
-        working-directory: ${{ env.PROJECT_DIR }}
+
+      # Enable signing if cert secret is valid base64 or a real path
+      - name: Prepare signing (robust guard)
+        working-directory: electron
+        shell: bash
         run: |
-          set -euo pipefail
-          if npm run -s dist:mac --if-present; then
-            echo "Ran npm run dist:mac"
-          elif npm run -s dist:mac-build --if-present; then
-            echo "Ran npm run dist:mac-build"
-          else
-            npx electron-builder --mac --${{ matrix.arch }} --publish=never
-          fi
+            set -euo pipefail
+
+            classify() {
+            if [ -z "${CSC_LINK:-}" ]; then echo "empty"; return; fi
+            if [ -d "${CSC_LINK}" ]; then echo "dir"; return; fi
+            if [ -f "${CSC_LINK}" ]; then echo "file"; return; fi
+            echo "string"
+            }
+
+            case "$(classify)" in
+            file)
+                # convert relative file path to absolute file:// URL
+                abs="file://$(python3 - <<'PY'
+            import os, sys
+            print(os.path.abspath(os.environ["CSC_LINK"]))
+            PY
+            )"
+                echo "CSC_LINK=$abs" >> $GITHUB_ENV
+                echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> $GITHUB_ENV
+                echo "Using local .p12 at $abs"
+                ;;
+            dir)
+                echo "CSC_LINK points to a DIRECTORY (${CSC_LINK}). Disabling signing."
+                echo "CSC_LINK=" >> $GITHUB_ENV
+                echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> $GITHUB_ENV
+                ;;
+            string)
+                echo "Trying base64 decode of CSC_LINK → /tmp/cert.p12"
+                node -e "require('fs').writeFileSync('/tmp/cert.p12', Buffer.from(process.env.CSC_LINK,'base64'))"
+                if [ -s /tmp/cert.p12 ]; then
+                echo "CSC_LINK=file:///tmp/cert.p12" >> $GITHUB_ENV
+                echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> $GITHUB_ENV
+                echo "Decoded base64 cert OK"
+                else
+                echo "CSC_LINK is not a file and base64 decode failed. Disabling signing."
+                echo "CSC_LINK=" >> $GITHUB_ENV
+                echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> $GITHUB_ENV
+                fi
+                ;;
+            empty)
+                echo "No CSC_LINK provided; signing stays disabled."
+                ;;
+            esac
+
+      - name: Build unsigned (macOS ${{ matrix.arch }})
+        working-directory: electron
+        shell: bash
+        run: |
+            set -euo pipefail
+
+            # 1) Kill all signing env in THIS shell (affects the builder process)
+            unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+
+            # 2) Override mac signing config: identity=null (no codesign),
+            #    also turn off hardenedRuntime/entitlements for CI so builder doesn't try to sign.
+            cat > /tmp/eb.dev.json <<'JSON'
+            {
+            "mac": {
+                "identity": null,
+                "hardenedRuntime": false,
+                "entitlements": null,
+                "entitlementsInherit": null,
+                "gatekeeperAssess": false
+            }
+            }
+            JSON
+
+            # 3) Build, never publish
+            if npm run -s dist:mac --if-present; then
+            # If your script calls electron-builder, pass the override config via env
+            npx electron-builder --mac --${{ matrix.arch }} --publish=never -c /tmp/eb.dev.json
+            elif npm run -s dist:mac-build --if-present; then
+            npx electron-builder --mac --${{ matrix.arch }} --publish=never -c /tmp/eb.dev.json
+            else
+            npx electron-builder --mac --${{ matrix.arch }} --publish=never -c /tmp/eb.dev.json
+            fi
+
+
+    #   - name: Build (macOS ${{ matrix.arch }})
+    #     working-directory: ${{ env.PROJECT_DIR }}
+    #     run: |
+    #       set -euo pipefail
+    #       if npm run -s dist:mac --if-present; then
+    #         echo "Ran npm run dist:mac"
+    #       elif npm run -s dist:mac-build --if-present; then
+    #         echo "Ran npm run dist:mac-build"
+    #       else
+    #         npx electron-builder --mac --${{ matrix.arch }} --publish=never
+    #       fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

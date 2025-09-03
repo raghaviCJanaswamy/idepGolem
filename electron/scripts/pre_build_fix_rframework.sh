@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Skip on non-macOS
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "Non-macOS host; skipping R.framework preparation."
+  exit 0
+fi
+
 DEST_ROOT="resources/R.framework"
 echo "=== Prepare R runtime into $DEST_ROOT ==="
 
