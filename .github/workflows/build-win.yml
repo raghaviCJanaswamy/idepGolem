@@ -1,7 +1,7 @@
 # name: Build Windows (Electron)
 # on:
 #   push:
-#     branches: [ master ]            # change if your default branch is different
+#     branches: [ gitac ]            # change if your default branch is different
 #     paths:
 #       - 'electron/**'
 #       - '.github/workflows/build-win.yml'
