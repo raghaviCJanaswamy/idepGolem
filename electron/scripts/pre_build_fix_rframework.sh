@@ -1,109 +1,125 @@
-#!/bin/bash
-set -euo pipefail
+# .github/workflows/build-mac.yml
+name: build-mac
 
-APP_NAME="idepGolem"
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "**/scripts/**"
+      - "**/app/**"
+      - "**/resources/**"
+      - "**/main.js"
+      - "**/package.json"
 
-# Try canonical CRAN framework location
-R_FRAMEWORK_SRC="/Library/Frameworks/R.framework"
+jobs:
+  mac:
+    name: mac (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-13
+            arch: x64
+    runs-on: ${{ matrix.runner }}
 
-# If not found, try to derive from R RHOME (when R is installed as a framework,
-# RHOME ends with .../R.framework/Resources)
-if [[ ! -d "$R_FRAMEWORK_SRC" ]]; then
-  if command -v R >/dev/null 2>&1; then
-    RH=$(R RHOME 2>/dev/null || true)
-    if [[ -n "${RH:-}" && "$RH" == *"/R.framework/Resources" ]]; then
-      R_FRAMEWORK_SRC="$(dirname "$RH")"
-    fi
-  fi
-fi
+    env:
+      PROJECT_DIR: .
+      R_VERSION: "4.4.1"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ (secrets.APPLE_ID && secrets.MAC_CERT_P12_BASE64) && 'true' || 'false' }}
 
-if [[ ! -d "$R_FRAMEWORK_SRC" ]]; then
-  echo "ERROR: R.framework not found."
-  echo "  Looked for: /Library/Frameworks/R.framework and (dirname of R RHOME if framework)."
-  echo "  Ensure the workflow runs 'r-lib/actions/setup-r@v2' on macOS before this script."
-  echo "  Debug info:"
-  command -v R >/dev/null 2>&1 && (R --version; echo "RHOME=$(R RHOME || true)") || echo "R command not found"
-  ls -l /Library/Frameworks || true
-  exit 1
-fi
+    steps:
+      - uses: actions/checkout@v4
 
-R_FRAMEWORK_DEST="resources/R.framework"
+      # Auto-detect project dir if yours is in a subfolder
+      - name: Detect project directory
+        if: env.PROJECT_DIR == '.'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for d in "." "idep-golem-package" "electron" "app"; do
+            if [ -f "$d/package.json" ]; then echo "PROJECT_DIR=$d" >> "$GITHUB_ENV"; exit 0; fi
+          done
+          found="$(git ls-files | grep -E '/?package\.json$' | grep -v node_modules | head -n1 || true)"
+          [ -n "$found" ] && echo "PROJECT_DIR=$(dirname "$found")" >> "$GITHUB_ENV" || (echo "No package.json found" && exit 1)
 
-echo "=== macOS Pre-Build: Preparing R.framework ==="
-echo "Using source: $R_FRAMEWORK_SRC"
-echo "Dest: $R_FRAMEWORK_DEST"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-# Step 0: Clean any previous copy
-rm -rf "$R_FRAMEWORK_DEST"
-mkdir -p "$(dirname "$R_FRAMEWORK_DEST")"
+      # 1) Install R via CRAN package (this puts R.framework in /Library/Frameworks)
+      - name: Setup R ${{ env.R_VERSION }}
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ env.R_VERSION }}
 
-# Step 1: Copy (preserve symlinks/attrs for speed, then we flatten)
-rsync -a "$R_FRAMEWORK_SRC/" "$R_FRAMEWORK_DEST/"
+      # 2) Sanity check that the Framework is present (debug if not)
+      - name: Confirm R.framework is present
+        shell: bash
+        run: |
+          set -euxo pipefail
+          R --version
+          R RHOME || true
+          ls -l /Library/Frameworks || true
+          test -d /Library/Frameworks/R.framework
 
-# Step 2: Flatten 'Current' so no 'Versions' symlinks remain
-pushd "$R_FRAMEWORK_DEST" >/dev/null
-CURRENT_VERSION=$(readlink Versions/Current || ls Versions | sort -V | tail -n 1 || true)
-if [[ -z "${CURRENT_VERSION:-}" || ! -d "Versions/$CURRENT_VERSION" ]]; then
-  echo "ERROR: Couldn't detect R.framework version in $(pwd)"
-  ls -l Versions || true
-  exit 1
-fi
-echo "Detected Current R version: $CURRENT_VERSION"
+      - name: Install deps
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm config set fund false
+          npm install --no-audit --no-fund
 
-for ITEM in Headers Resources PrivateHeaders Libraries; do
-  SRC_PATH="Versions/$CURRENT_VERSION/$ITEM"
-  if [[ -d "$SRC_PATH" ]]; then
-    echo "Copying $ITEM from $SRC_PATH"
-    rm -rf "$ITEM"
-    cp -R "$SRC_PATH" "$ITEM"
-  else
-    echo "$ITEM missing in $SRC_PATH — creating empty folder"
-    rm -rf "$ITEM"
-    mkdir -p "$ITEM"
-  fi
-done
+      # 3) Run your mac-only R.framework flattening script
+      - name: Prepare embedded R.framework (flatten)
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/pre_build_fix_rframework.sh || true
+          bash scripts/pre_build_fix_rframework.sh
 
-# Step 3: Remove ALL Versions directories recursively
-echo "Removing ALL 'Versions' folders..."
-find . -type d -name "Versions" -prune -exec rm -rf {} +
+      - name: Verify flattened R.framework
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RFW="resources/R.framework"
+          [ -d "$RFW/Resources" ]
+          if [ -x "$RFW/Resources/bin/Rscript" ] || [ -x "$RFW/Resources/Rscript" ]; then
+            echo "✅ Rscript exists in flattened framework"
+          else
+            echo "❌ Rscript missing in $RFW/Resources"; ls -la "$RFW/Resources" || true; exit 1
+          fi
 
-popd >/dev/null
+      - name: Build (macOS ${{ matrix.arch }})
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          if npm run -s dist:mac --if-present; then
+            echo "Ran npm run dist:mac"
+          elif npm run -s dist:mac-build --if-present; then
+            echo "Ran npm run dist:mac-build"
+          else
+            npx electron-builder --mac --${{ matrix.arch }}
+          fi
 
-# Step 4: Verify R and Rscript exist (handle either layout)
-RSCRIPT_CANDIDATES=(
-  "$R_FRAMEWORK_DEST/Resources/Rscript"
-  "$R_FRAMEWORK_DEST/Resources/bin/Rscript"
-)
-R_CANDIDATES=(
-  "$R_FRAMEWORK_DEST/Resources/R"
-  "$R_FRAMEWORK_DEST/Resources/bin/R"
-)
-
-FOUND_RSCRIPT=""
-for p in "${RSCRIPT_CANDIDATES[@]}"; do
-  if [[ -f "$p" ]]; then FOUND_RSCRIPT="$p"; break; fi
-done
-
-FOUND_R=""
-for p in "${R_CANDIDATES[@]}"; do
-  if [[ -f "$p" ]]; then FOUND_R="$p"; break; fi
-done
-
-if [[ -z "$FOUND_RSCRIPT" ]]; then
-  echo "ERROR: Rscript not found in expected locations:"
-  printf '  - %s\n' "${RSCRIPT_CANDIDATES[@]}"
-  echo "Directory listing of Resources:"; ls -la "$R_FRAMEWORK_DEST/Resources" || true
-  exit 1
-fi
-
-if [[ -z "$FOUND_R" ]]; then
-  echo "WARNING: 'R' launcher not found; continuing."
-  printf '  Checked: %s\n' "${R_CANDIDATES[@]}"
-fi
-
-chmod +x "$FOUND_RSCRIPT" || true
-[[ -n "$FOUND_R" ]] && chmod +x "$FOUND_R" || true
-
-echo "Success: R.framework prepared."
-echo "Using Rscript at: $FOUND_RSCRIPT"
-[[ -n "$FOUND_R" ]] && echo "Using R at: $FOUND_R"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.arch }}-dist
+          path: |
+            ${{ env.PROJECT_DIR }}/dist/**/*.dmg
+            ${{ env.PROJECT_DIR }}/dist/**/*.zip
+            ${{ env.PROJECT_DIR }}/dist/**/*.app
+            ${{ env.PROJECT_DIR }}/dist/*.yml
+            ${{ env.PROJECT_DIR }}/dist/*.blockmap
+          if-no-files-found: warn
