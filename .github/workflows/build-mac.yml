@@ -30,14 +30,19 @@ jobs:
       PROJECT_DIR: electron
       R_VERSION: "4.4.1"
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      CSC_LINK: ""
+      CSC_KEY_PASSWORD: ""
+      APPLE_ID: ""
+      APPLE_APP_SPECIFIC_PASSWORD: ""
+      APPLE_TEAM_ID: ""
       # (Optional) signing; leave empty for unsigned dev builds
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}
-      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-      CSC_IDENTITY_AUTO_DISCOVERY: ${{ (secrets.APPLE_ID && secrets.MAC_CERT_P12_BASE64) && 'true' || 'false' }}
+      # APPLE_ID: ${{ secrets.APPLE_ID }}
+      # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      # CSC_LINK: ${{ secrets.MAC_CERT_P12_BASE64 }}
+      # CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      # CSC_IDENTITY_AUTO_DISCOVERY: ${{ (secrets.APPLE_ID && secrets.MAC_CERT_P12_BASE64) && 'true' || 'false' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -105,7 +110,7 @@ jobs:
           elif npm run -s dist:mac-build --if-present; then
             echo "Ran npm run dist:mac-build"
           else
-            npx electron-builder --mac --${{ matrix.arch }}
+            npx electron-builder --mac --${{ matrix.arch }} --publish=never
           fi
 
       - name: Upload artifacts
