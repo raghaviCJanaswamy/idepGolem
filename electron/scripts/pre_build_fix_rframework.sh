@@ -4,7 +4,7 @@ name: build-mac
 on:
   workflow_dispatch:
   push:
-    tags: ["v*"]
+    branches: ["gitac"]
   pull_request:
     paths:
       - "**/scripts/**"
