@@ -99,6 +99,16 @@ jobs:
             echo "❌ Rscript not found in flattened framework"; ls -la "$RFW/Resources" || true; exit 1
           fi
 
+      - name: Git sanity
+        run: |
+          pwd
+          ls -la
+          git rev-parse --show-toplevel || true
+          ls -la .git || true
+          git remote -v || true
+        working-directory: ${{ env.PROJECT_DIR }}
+
+
       - name: Build (macOS ${{ matrix.arch }})
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
