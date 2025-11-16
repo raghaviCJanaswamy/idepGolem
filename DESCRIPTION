@@ -1,23 +1,27 @@
-Package: idepGolem
-Title: Integrated Differential Expression and Pathway Analysis
-Version: 2.4.2
+Package: MyGolemElectronApp
+Type: Package
+Title: My Golem Electron App
+Version: 1.0.0
 Authors@R: 
-    person(given = "Xijin",
-           family = "Ge",
-           role = c("aut", "cre"),
-           email = "xijin.ge@sdstate.edu")
-Description: What the package does (one paragraph).
-License: What license is it under?
-Imports: 
+    person("Raghavi", "Janawamy", email = "raghavi.janaswamy@gmail.com", role = c("aut", "cre"))
+Description: A Shiny application packaged with golem for use with an Electron wrapper.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Depends:
+    R (>= 4.2)
+Imports:
     biclust,
+    Biobase,
     bslib,
     circlize,
     ComplexHeatmap,
     config (>= 0.3.1),
     DBI,
+    DESeq2,
     dendextend,
     dplyr,
-    DESeq2,
     DT,
     dynamicTreeCut,
     e1071,
@@ -31,15 +35,74 @@ Imports:
     ggplot2,
     ggraph,
     golem (>= 0.3.1),
-    graphics,
-    grDevices,
-    grid,
+    GSVA,
     hexbin,
     hgu133plus2.db,
     htmltools (>= 0.5.2),
+    httr,
     igraph,
     InteractiveComplexHeatmap,
+    jsonlite,
+    KEGGREST,
     knitr,
+    pathview,
+    PCAtools,
+    pkgload,
+    plotly,
+    png,
+    purrr,
+    QUBIC,
+    ReactomePA,
+    readxl,
+    reshape2,
+    rmarkdown,
+    RSQLite,
+    Rtsne,
+    runibic,
+    shiny (>= 1.6.0),
+    shinyBS,
+    shinybusy,
+    shinyjs,
+    stringr,
+    tidyr,
+    tidyselect,
+    tidytext,
+    tippy,
+    visNetwork,
+    WGCNA,
+    wordcloud2
+Suggests:
+    BiocManager,
+    devtools,
+    DESeq2,
+    edgeR,
+    e1071,
+    factoextra,
+    fgsea,
+    flashClust,
+    gage,
+    GGalt,
+    ggraph,
+    GSVA,
+    hexbin,
+    hgu133plus2.db,
+    InteractiveComplexHeatmap,
+    knitr,
+    limma,
+    PCAtools,
+    pathview,
+    QUBIC,
+    readxl,
+    reshape2,
+    rmarkdown,
+    Rtsne,
+    testthat (>= 3.0.0),
+    tidytext,
+    wordcloud2,
+    dynamicTreeCut,
+    dendextend,
+    WGCNA,
+    GetoptLong,
     ottoPlots,
     org.Ag.eg.db,
     org.At.tair.db,
@@ -58,39 +121,7 @@ Imports:
     org.Rn.eg.db,
     org.Sc.sgd.db,
     org.Ss.eg.db,
-    org.Xl.eg.db,
-    pathview,
-    PCAtools,
-    pkgload,
-    plotly,
-    png,
-    QUBIC,
-    ReactomePA,
-    GSVA,
-    reshape2,
-    rmarkdown,
-    RSQLite,
-    Rtsne,
-    runibic,
-    shiny (>= 1.6.0),
-    shinyAce,
-    shinybusy,
-    shinyjs,
-    stats,
-    stringr,
-    tidyr,
-    tidyselect,
-    tidytext,
-    tippy,
-    utils,
-    visNetwork,
-    WGCNA,
-    wordcloud2,
-    shinyBS,
-    ggupset,
-    purrr,
-    R.utils,
-    readxl
+    org.Xl.eg.db    
 biocViews: 
     Biobase,
     limma,
@@ -103,10 +134,6 @@ Remotes:
     url::https://bioconductor.org/packages/3.10/bioc/src/contrib/PGSEA_1.60.0.tar.gz,
     url::http://www.bioconductor.org/packages//2.11/data/annotation/src/contrib/KEGG.db_2.8.0.tar.gz,
     url::https://www.bioconductor.org/packages//2.10/data/annotation/src/contrib/org.Pf.plasmo.db_2.7.1.tar.gz
-Encoding: UTF-8
 LazyData: true
-RoxygenNote: 7.3.3
-Suggests: 
-    testthat (>= 3.0.0)
 VignetteBuilder: knitr
 Config/testthat/edition: 3

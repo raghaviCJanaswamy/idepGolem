@@ -1,0 +1,62 @@
+{
+  "name": "idepGolem",
+  "version": "1.0.0",
+  "description": "MyGolemElectronApp with vendored R",
+  "private": true,
+  "main": "main.js",
+  "author": "Raghavi C Janaswamy",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/raghaviCJanaswamy/MyGolemElectronApp.git"
+  },  
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron .",
+    "build": "electron-builder --win nsis",
+    "dist:win": "electron-builder --win nsis"
+  },
+  "dependencies": {
+    "cross-spawn": "^7.0.3"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "24.13.3",
+    "@electron/notarize": "^2.2.0"
+  },
+  "build": {
+    "appId": "com.example.idepgolem",
+    "productName": "MyGolemElectronApp",
+    "directories": { "output": "release" },
+
+    "files": [
+      "main.js",
+      "package.json",
+      "dist/**"
+    ],
+    "asar": false,
+    "extraResources": [
+      { "from": "app", "to": "app" }                              
+    ],
+    "afterPack": "./scripts/after-pack-fix-perms.js",
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],      
+      "publish": [
+        {
+          "provider": "github"
+        }
+      ],
+      "extraResources": [
+        { "from": "r-runtime", "to": "r-runtime", "filter": ["**/*"]},
+        { "from": "app",       "to": "app" }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup-${version}.exe"
+    }
+  }
+}
