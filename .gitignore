@@ -6,3 +6,8 @@ inst/doc
 data107
 data113
 Rplots.pdf
+/electron/dist/*
+/electron/node_modules/*
+/electron/electron/*
+/node_modules
+/data113/*
