@@ -1,417 +1,256 @@
-name: Golem Electron App - Description FILE Test
+name: Build Windows (Electron + R.win)
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ packaging ]
+    branches:
+      - packaging
+      - 'rel*'
+    tags:
+      - 'rel*'
     paths:
       - "electron/**"
-      - "idepgolem/**"
-      - "app/**"
+      - "R/**"
+      - "app.R"
+      - "DESCRIPTION"
       - "package.json"
-      - ".github/workflows/*.yml"      
-      
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+      - ".github/workflows/build-electron-windows.yml"
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # - os: macos-14
-          #   node: 20
-          #   r_version: "4.4.1"
-          #   mac_arch: "arm64"
-          - os: windows-latest
-            node: 20
-            r_version: "4.4.1"
-            win_arch: "x64"
-
-    runs-on: ${{ matrix.os }}
-
-    # Run all commands inside the electron/ folder
+    runs-on: windows-latest
     defaults:
       run:
-        working-directory: electron
-
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }} 
-      # mac notarization (optional)
-      # APPLE_ID: ${{ secrets.APPLE_ID }}
-      # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: pwsh
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Use Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}       
-          cache: npm
-          cache-dependency-path: electron/package-lock.json  # <-- lockfile location
-
-      - name: Show tree (debug)
-        shell: bash
+      # Figure out where package.json is (electron/ or repo root)
+      - name: Detect package directory
+        id: detect-pkgdir
+        shell: pwsh
         run: |
-          pwd
-          ls -la
-          echo "Parent:"
-          ls -la ..
+          $ErrorActionPreference='Stop'
+          if (Test-Path "electron/package.json") {
+            "PACKAGE_DIR=electron" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } elseif (Test-Path "package.json") {
+            "PACKAGE_DIR=." | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+            throw "package.json not found at repo root or electron/"
+          }
+          Write-Host "PACKAGE_DIR = $env:PACKAGE_DIR"
 
-      # runs inside electron/ per your defaults.run.working-directory
-      - name: Install npm deps (prefer ci, fallback to install)
+      # Find the idepGolem R package source by DESCRIPTION
+      - name: Detect R package source (idepGolem)
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $desc = Get-ChildItem -Path . -Recurse -File -Filter DESCRIPTION -ErrorAction SilentlyContinue |
+            Where-Object { Select-String -Path $_.FullName -Pattern '^Package:\s*idepGolem\b' -Quiet } |
+            Select-Object -First 1
+          if (-not $desc) { throw "idepGolem package source not found (no DESCRIPTION with Package: idepGolem)" }
+          "PKG_SRC=$($desc.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "PKG_SRC = $env:PKG_SRC"
+
+      - name: Detect package name from DESCRIPTION
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $desc = Join-Path $env:PKG_SRC "DESCRIPTION"
+          if (-not (Test-Path $desc)) { throw "DESCRIPTION not found at: $desc" }
+          $m = Select-String -Path $desc -Pattern '^Package:\s*(\S+)' -List
+          if (-not $m) { throw "Could not parse Package field in: $desc" }
+          "PKG_NAME=$($m.Matches.Groups[1].Value)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "PKG_NAME = $env:PKG_NAME"
+
+      # Optional: fix invalid filename if present
+      - name: Fix invalid filename in R/ (leading underscore)
+        shell: pwsh
+        run: |
+          $bad = Join-Path $env:PKG_SRC 'R\_disable_autoload.R'
+          if (Test-Path $bad) {
+            $good = Join-Path $env:PKG_SRC 'R\z_disable_autoload.R'
+            Move-Item -Force $bad $good
+          }
+
+      - name: Setup Node
+        uses: actions/setup-node@v4    
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ env.PACKAGE_DIR }}/package-lock.json
+
+      # Install npm deps where package.json actually is
+      - name: Install npm deps
         shell: bash
+        working-directory: ${{ env.PACKAGE_DIR }}
         run: |
           set -euxo pipefail
           if [ -f package-lock.json ]; then
-            # try clean, else regenerate lock + install
-            npm ci || (echo "npm ci failed — lockfile out of sync. Falling back to npm install…" \
-              && rm -rf node_modules \
-              && npm install --no-fund --no-audit)
+            npm ci || (rm -rf node_modules && npm install --no-fund --no-audit)
           else
             npm install --no-fund --no-audit
           fi
 
-      # --- WINDOWS-ONLY: download, install, make portable tree, install pkgs, verify ---
-      - name: Download R (Windows) with retries & mirror fallback
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        env:
-          R_VERSION: "4.5.2"
+      # Ensure electron-builder is available locally in that same folder
+      - name: Ensure electron-builder present
+        shell: bash
+        working-directory: ${{ env.PACKAGE_DIR }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          set -euxo pipefail
+          if ! npx --yes --package=electron-builder@26.0.12 --call "echo ok" >/dev/null 2>&1; then
+            npm install -D electron-builder@26.0.12
+          fi
 
-          $urls = @(
-            "https://cloud.r-project.org/bin/windows/base/R-$env:R_VERSION-win.exe",
-            "https://cran.r-project.org/bin/windows/base/R-$env:R_VERSION-win.exe",
-            "https://mirror.las.iastate.edu/CRAN/bin/windows/base/R-$env:R_VERSION-win.exe"
-          )
-
-          $out = "R-win.exe"
-          if (Test-Path $out) { Remove-Item $out -Force }
-
-          function TryCurl($u, $o) {
-            Write-Host "curl -> $u"
-            $psi = @{
-              FilePath = "curl.exe"
-              ArgumentList = @("--fail","--location","--retry","5","--retry-delay","5","--retry-connrefused","--connect-timeout","30","-o",$o,$u)
-              Wait = $true
-              NoNewWindow = $true
-            }
-            try {
-              $p = Start-Process @psi -PassThru
-              if ($p.ExitCode -eq 0) { return $true } else { Write-Host "curl exit $($p.ExitCode)"; return $false }
-            } catch { Write-Host "curl exception: $($_.Exception.Message)"; return $false }
-          }
-
-          function TryIwr($u, $o) {
-            Write-Host "Invoke-WebRequest -> $u"
-            $ok = $false
-            for ($i=1; $i -le 5; $i++) {
-              try {
-                Invoke-WebRequest -Uri $u -OutFile $o -TimeoutSec 120
-                $ok = $true
-                break
-              } catch {
-                Write-Host "iwr attempt $i failed: $($_.Exception.Message)"
-                Start-Sleep -Seconds ([Math]::Min(30, 3 * [Math]::Pow(2, $i)))
-              }
-            }
-            return $ok
-          }
-
-          $downloaded = $false
-          foreach ($u in $urls) {
-            if (TryCurl $u $out) { $downloaded = $true; break }
-            if (TryIwr  $u $out) { $downloaded = $true; break }
-          }
-
-          if (-not $downloaded) {
-            Write-Host "Could not download R after trying mirrors/tools."
-            ipconfig
-            nslookup cloud.r-project.org | Out-Host
-            throw "R installer download failed"
-          }
-
-          Write-Host "Downloaded $out (size: $(Get-Item $out).Length bytes)"
-
-      - name: Install R silently to workspace
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        run: |
-          $dst = Join-Path $env:GITHUB_WORKSPACE 'r-temp'
-          New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          Start-Process -FilePath .\R-win.exe -ArgumentList '/VERYSILENT','/NORESTART',("/DIR=""$dst""") -Wait
-
-      - name: Move portable R into app project (electron/)
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        run: |
-          function HasRScript($p) {
-            (Test-Path (Join-Path $p 'bin\Rscript.exe')) -or
-            (Test-Path (Join-Path $p 'bin\x64\Rscript.exe'))
-          }
-
-          # Candidate roots where R might exist
-          $candidates = @(
-            (Join-Path $env:GITHUB_WORKSPACE 'r-runtime'),
-            (Join-Path $env:GITHUB_WORKSPACE 'electron\r-runtime'),
-            (Join-Path $env:GITHUB_WORKSPACE 'r-temp'),
-            (Join-Path $env:GITHUB_WORKSPACE 'electron\r-temp')
-          ) | Where-Object { Test-Path $_ }
-
-          if (-not $candidates -or $candidates.Count -eq 0) {
-            Write-Host "No r-runtime/r-temp folders found. Listing workspace (depth 2) for clues:"
-            Get-ChildItem -Recurse -Depth 2 $env:GITHUB_WORKSPACE | Select-Object FullName
-            throw "No portable R tree to copy."
-          }
-
-          # Find a candidate that actually contains Rscript.exe
-          $srcRoot = $null
-          foreach ($c in $candidates) {
-            if (HasRScript $c) { $srcRoot = $c; break }
-            # If the candidate is a parent (e.g., r-temp), check its immediate children
-            $child = Get-ChildItem -Directory $c -ErrorAction SilentlyContinue |
-                    Where-Object { HasRScript $_.FullName } |
-                    Select-Object -First 1
-            if ($child) { $srcRoot = $child.FullName; break }
-          }
-
-          if (-not $srcRoot) {
-            Write-Host "Could not find a folder containing bin\Rscript.exe."
-            Write-Host "Candidates checked:"
-            $candidates | ForEach-Object { $_ }
-            Write-Host "r-temp quick listing (if present):"
-            if (Test-Path (Join-Path $env:GITHUB_WORKSPACE 'r-temp')) {
-              Get-ChildItem -Recurse -Depth 2 (Join-Path $env:GITHUB_WORKSPACE 'r-temp') | Select-Object FullName
-            }
-            throw "Portable R not found."
-          }
-
-          Write-Host "Found portable R at: $srcRoot"
-          $dst = Join-Path $env:GITHUB_WORKSPACE 'electron\r-runtime'
-          if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
-          Copy-Item -Recurse -Force $srcRoot $dst
-
-          # Sanity check
-          if (Test-Path (Join-Path $dst 'bin\x64\Rscript.exe')) {
-            & (Join-Path $dst 'bin\x64\Rscript.exe') --version
-          } elseif (Test-Path (Join-Path $dst 'bin\Rscript.exe')) {
-            & (Join-Path $dst 'bin\Rscript.exe') --version
-          } else {
-            throw "Copied r-runtime but Rscript.exe not found at $dst\bin"
-          }
-
-
-
-      - name: Make portable R tree (robust)
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        run: |
-          $dst = Join-Path $env:GITHUB_WORKSPACE 'r-temp'
-          $portable = Join-Path $env:GITHUB_WORKSPACE 'r-runtime'
-          if (Test-Path $portable) { Remove-Item -Recurse -Force $portable }
-
-          function HasRScript($p) {
-            (Test-Path (Join-Path $p 'bin\Rscript.exe')) -or
-            (Test-Path (Join-Path $p 'bin\x64\Rscript.exe'))
-          }
-
-          $root = $null
-          if (HasRScript $dst) {
-            $root = $dst
-          } else {
-            $cand = Get-ChildItem -Directory $dst -ErrorAction SilentlyContinue |
-                    Where-Object { HasRScript $_.FullName } |
-                    Select-Object -First 1
-            if ($cand) { $root = $cand.FullName }
-          }
-
-          if (-not $root) {
-            Write-Host "Contents of $($dst):"
-            Get-ChildItem -Recurse -Depth 2 $dst -ErrorAction SilentlyContinue | Select-Object FullName
-            throw "Could not find an R runtime under $($dst) (no bin\Rscript.exe found)."
-          }
-
-          Write-Host "Using R root: $($root)"
-          Copy-Item -Recurse -Force $root $portable
-
-          $rscript = if (Test-Path (Join-Path $portable 'bin\x64\Rscript.exe')) {
-            Join-Path $portable 'bin\x64\Rscript.exe'
-          } elseif (Test-Path (Join-Path $portable 'bin\Rscript.exe')) {
-            Join-Path $portable 'bin\Rscript.exe'
-          } else {
-            throw "After copy, Rscript not found under $($portable)\bin"
-          }
-
-          & $rscript --version
-
-
-
-      - name: Install R packages into portable library (args, no backslashes in R strings)
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        env:
-          CRAN_MIRROR: https://cloud.r-project.org
-        run: |
-          $rhome   = Join-Path $env:GITHUB_WORKSPACE 'r-runtime'
-          $rscript = if (Test-Path (Join-Path $rhome 'bin\x64\Rscript.exe')) {
-            Join-Path $rhome 'bin\x64\Rscript.exe'
-          } else {
-            Join-Path $rhome 'bin\Rscript.exe'
-          }
-
-          $libDir = Join-Path $rhome 'library'
-          $lines = @(
-            'args <- commandArgs(trailingOnly = TRUE)',
-            'lib  <- normalizePath(args[[1]], winslash = "/", mustWork = FALSE)',
-            'if (!dir.exists(lib)) dir.create(lib, recursive = TRUE)',
-            '.libPaths(lib)',
-            'options(repos = Sys.getenv("CRAN_MIRROR", "https://cran.r-project.org"))',
-            'install.packages(c("jsonlite","httr"), lib = lib)',
-            'cat("LIB=", lib, "\n")',
-            'q(status = 0)'
-          )
-          $tmp = Join-Path $env:RUNNER_TEMP 'setup-r-libs.R'
-          $lines -join "`n" | Set-Content -Encoding UTF8 $tmp
-
-          # Pass the Windows path as an ARG (R will not parse backslashes from a quoted literal)
-          & $rscript --vanilla $tmp $libDir
-
-      - name: Install DESCRIPTION deps into packaged portable lib (binary-only)
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        run: |
-          $rhome   = Join-Path $env:GITHUB_WORKSPACE 'electron\r-runtime'
-          $rscript = if (Test-Path (Join-Path $rhome 'bin\x64\Rscript.exe')) {
-            Join-Path $rhome 'bin\x64\Rscript.exe'
-          } else {
-            Join-Path $rhome 'bin\Rscript.exe'
-          }
-          $libDir = Join-Path $rhome 'library'
-
-          # Folder that CONTAINS DESCRIPTION (change if your DESCRIPTION lives elsewhere)
-          $pkgdir = @(
-            (Join-Path $env:GITHUB_WORKSPACE 'mygolemelectronapp'),
-            (Join-Path $env:GITHUB_WORKSPACE '.'),
-            (Join-Path $env:GITHUB_WORKSPACE 'electron')
-          ) | Where-Object { Test-Path (Join-Path $_ 'DESCRIPTION') } | Select-Object -First 1
-
-          if (-not $pkgdir) {
-            Write-Host "No DESCRIPTION found. Some candidates:"
-            Get-ChildItem -Recurse -Filter DESCRIPTION $env:GITHUB_WORKSPACE -ErrorAction SilentlyContinue | Select-Object -First 10 FullName
-            throw "Cannot locate a package directory that contains DESCRIPTION."
-          }
-
-          $lines = @(
-            'args   <- commandArgs(trailingOnly = TRUE)',
-            'lib    <- normalizePath(args[[1]], winslash = "/", mustWork = FALSE)',
-            'pkgdir <- normalizePath(args[[2]], winslash = "/", mustWork = TRUE)',
-            'dir.create(lib, recursive = TRUE, showWarnings = FALSE)',
-            '.libPaths(unique(c(lib, .libPaths())))',
-
-            # >>> prevent compilation from source
-            'options(pkgType = "win.binary", install.packages.compile.from.source = "never")',
-            'Sys.setenv(R_LIBS_USER = lib, R_LIBS_SITE = lib,',
-            '           R_REMOTES_NO_ERRORS_FROM_WARNINGS = "true",',
-            '           R_COMPILE_AND_INSTALL_PACKAGES     = "never",',
-            '           R_WIN_NO_BUILD                     = "TRUE",',
-            '           MAKE = "")',
-
-            # Repositories: CRAN + Bioc (binary)
-            'cran <- Sys.getenv("CRAN_MIRROR", "https://cloud.r-project.org")',
-            'if (!requireNamespace("BiocManager", quietly = TRUE))',
-            '  install.packages("BiocManager", repos = cran, type = "win.binary", lib = lib, quiet = TRUE)',
-
-            # BiocManager::repositories() includes CRAN + Bioc; binary repos on Windows
-            'options(repos = BiocManager::repositories(), Ncpus = max(1L, parallel::detectCores() - 1L))',
-
-            # Tools needed to parse DESCRIPTION and install deps (binary)
-            'if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes", repos = cran, type = "win.binary", lib = lib, quiet = TRUE)',
-            'if (!requireNamespace("desc",    quietly = TRUE)) install.packages("desc",    repos = cran, type = "win.binary", lib = lib, quiet = TRUE)',
-
-            # Validate DESCRIPTION early (also catches blank rows that caused earlier failures)
-            'ok <- tryCatch(desc::desc_validate(pkgdir), error = identity)',
-            'if (inherits(ok, "error")) stop("desc_validate error: ", conditionMessage(ok))',
-
-            # Inspect deps
-            'deps <- desc::desc_get_deps(pkgdir)',
-            'bad  <- subset(deps, is.na(package) | package == "")',
-            'if (nrow(bad)) stop("Malformed dependency rows:\\n", paste(capture.output(print(bad)), collapse = "\\n"))',
-            'print(deps)',
-
-            # Install only core deps (no Suggests) — binary only
-            'remotes::install_deps(pkgdir = pkgdir,',
-            '  dependencies = c("Depends","Imports","LinkingTo"),',
-            '  upgrade = "never", lib = lib, quiet = FALSE, type = getOption("pkgType"))',
-
-            # Show what landed
-            'cat("\\nActive .libPaths():\\n"); print(.libPaths())',
-            'ip <- installed.packages(lib.loc = lib, noCache = TRUE)[,c("Package","Version")]',
-            'cat("\\nInstalled (first 25):\\n"); print(head(ip[order(ip[,"Package"]),], 25))',
-            'q(status = 0)'
-          )
-
-          $tmp = Join-Path $env:RUNNER_TEMP 'install-deps-binary.R'
-          $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-          [System.IO.File]::WriteAllText($tmp, ($lines -join "`n"), $Utf8NoBom)
-
-          & $rscript --vanilla $tmp $libDir $pkgdir
-
-
-
-
-      - name: Verify shiny in vendored runtime (Windows)
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        shell: pwsh
-        run: |
-          $rhome   = Join-Path $PWD 'r-runtime'     # <- electron\r-runtime
-          if (-not (Test-Path $rhome)) {
-            Write-Host "r-runtime not found at $rhome. Listing electron/:"
-            Get-ChildItem -Recurse -Depth 2 $PWD | Select-Object FullName
-            throw "portable runtime missing"
-          }
-
-          $rscript = if (Test-Path (Join-Path $rhome 'bin\x64\Rscript.exe')) {
-            Join-Path $rhome 'bin\x64\Rscript.exe'
-          } else {
-            Join-Path $rhome 'bin\Rscript.exe'
-          }
-          $lib = Join-Path $rhome 'library'
-
-          $rCheck = @(
-            'lib <- normalizePath(commandArgs(TRUE)[1], winslash="/", mustWork=FALSE)',
-            'cat("Checking library at:", lib, "\n")',
-            '.libPaths(c(lib, .libPaths()))',
-            'print(.libPaths())',
-            'ok <- requireNamespace("shiny", quietly=TRUE)',
-            'if (!ok) {',
-            '  cat("shiny not found. Installed packages (first 20):\n")',
-            '  print(head(installed.packages(lib.loc = lib, noCache = TRUE)[,c("Package","Version")], 20))',
-            '  q(status = 1)',
-            '} else { cat("shiny is available.\n"); q(status = 0) }'
-          ) -join "`n"
-
-          $tf = Join-Path $env:RUNNER_TEMP "check_lib.R"
-          [System.IO.File]::WriteAllText($tf, $rCheck, (New-Object System.Text.UTF8Encoding($false)))
-          & $rscript '--vanilla' $tf '--args' $lib
-
-
-      - name: Setup R
+      # R + Rtools (kept as in your config)
+      - name: Setup R (with Rtools)
         uses: r-lib/actions/setup-r@v2
         with:
-          r-version: '4.4.1'        
+          r-version: '4.4.1'
+          rtools-version: '44'
 
-      - name: Build
-        run: npm run build
+      # Stage a full R runtime into the app folder
+      - name: Stage R.win (mirror R.home into runtime/R.win)
+        shell: pwsh
+        run: |
+          $RHOME = & Rscript -e "cat(R.home())"
+          if (-not $RHOME) { throw "Could not get R.home()" }
+          $dst = Join-Path ${{ env.PACKAGE_DIR }} "runtime\R.win"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          robocopy "$RHOME" "$dst" /MIR /NFL /NDL /NJH /NJS /NP /R:2 /W:2
+          if ($LASTEXITCODE -ge 8) { throw "robocopy failed with code $LASTEXITCODE" }
+          $global:LASTEXITCODE = 0
 
-      - name: Upload artifacts
+      - name: Resolve bundled paths (debug)
+        shell: pwsh
+        run: |
+          $app     = "${{ env.PACKAGE_DIR }}"
+          $lib     = Join-Path $app "runtime\R.win\library"
+          $rscript = Join-Path $app "runtime\R.win\bin\Rscript.exe"
+          Write-Host "APP:      $app"
+          Write-Host "Rscript:  $rscript"
+          Write-Host "LIB PATH: $lib"
+          if (!(Test-Path $rscript)) { throw "Bundled Rscript.exe not found at $rscript" }
+          if (!(Test-Path $lib))     { New-Item -ItemType Directory -Force -Path $lib | Out-Null }
+
+      - name: Install ottoPlots into bundled lib
+        shell: pwsh
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}   # or your PAT if needed
+        run: |
+          $app  = Join-Path $pwd "${{ env.PACKAGE_DIR }}"
+          $lib  = (Join-Path $app "runtime\R.win\library") -replace '\\','/'
+          $R    = Join-Path $app "runtime\R.win\bin\Rscript.exe"
+
+          & $R -e "if(!requireNamespace('remotes', quietly=TRUE)) install.packages('remotes', lib='$lib', repos='https://cran.r-project.org')"
+          & $R -e "remotes::install_github('espors/ottoPlots', lib='$lib', dependencies=TRUE, upgrade='never')"
+                      
+      # Install DESCRIPTION deps into bundled lib (CRAN + BioC, special-case ggalt)
+      - name: Install DESCRIPTION deps into bundled library
+        shell: pwsh
+        run: |
+          $app     = "${{ env.PACKAGE_DIR }}"
+          $lib     = Join-Path $app "runtime\R.win\library"
+          $rscript = Join-Path $app "runtime\R.win\bin\Rscript.exe"
+          $desc    = Join-Path $env:PKG_SRC "DESCRIPTION"
+          $libR  = $lib  -replace '\\','/'
+          $descR = $desc -replace '\\','/'
+          $r = @"
+            args <- commandArgs(trailingOnly=TRUE)
+            desc <- args[1]; lib <- args[2]
+            if (!dir.exists(lib)) dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+            .libPaths(c(lib, .libPaths()))
+            opt_repos <- c(CRAN='https://cran.r-project.org')
+            options(repos = opt_repos, Ncpus = max(1L, parallel::detectCores()-1L))
+            if (!requireNamespace('BiocManager', quietly=TRUE))
+              install.packages('BiocManager', repos=opt_repos['CRAN'], lib=lib)
+            if (!requireNamespace('remotes', quietly=TRUE))
+              install.packages('remotes',     repos=opt_repos['CRAN'], lib=lib)
+            d <- read.dcf(desc)
+            parse <- function(field) {
+              if (!field %in% colnames(d)) return(character())
+              x <- gsub('\\n', ' ', d[1, field])
+              x <- unlist(strsplit(x, ','))
+              x <- gsub('\\s*\\(.*?\\)\\s*', '', x)
+              trimws(x)
+            }
+            pkgs <- unique(c(parse('Depends'), parse('Imports')))
+            pkgs <- setdiff(pkgs, c('R','base'))
+            want_ggalt <- 'ggalt' %in% pkgs
+            pkgs <- setdiff(pkgs, 'ggalt')
+            bioc <- intersect(pkgs, c('DESeq2','edgeR','ComplexHeatmap','GSVA','gage',
+                                      'hgu133plus2.db','InteractiveComplexHeatmap',
+                                      'PCAtools','pathview','QUBIC','fgsea'))
+            cran <- setdiff(pkgs, bioc)
+            if (length(cran)) install.packages(cran, lib=lib, dependencies=TRUE)
+            if (length(bioc)) BiocManager::install(bioc, lib=lib, ask=FALSE, update=FALSE)            
+            if (want_ggalt && !('ggalt' %in% rownames(installed.packages(lib.loc=lib)))) {
+              remotes::install_version('ggalt', version='0.4.0',
+                                      lib=lib, upgrade='never', dependencies=TRUE)
+            }
+            ip <- installed.packages(lib.loc = lib)
+            cat('Installed packages in bundled lib:', nrow(ip), '\n')
+            cat('ggalt present:', 'ggalt' %in% rownames(ip), '\n')
+          "@
+          Set-Content -Path install_desc.R -Value $r -Encoding UTF8
+          & $rscript install_desc.R $descR $libR
+
+      - name: Build and install idepGolem into R.win/library
+        shell: pwsh
+        env:
+          _R_CHECK_FORCE_SUGGESTS_: "false"
+          R_BUILD_DONTFAIL_ON_WARNING_: "true"
+          R_BUILD_TAR: tar
+          TAR: tar
+        run: |
+          $app    = "${{ env.PACKAGE_DIR }}"
+          $lib    = Join-Path $app "runtime\R.win\library"
+          $Rexe   = Join-Path $app "runtime\R.win\bin\R.exe"
+          $libR   = $lib -replace '\\','/'
+          Push-Location $env:PKG_SRC
+          & $Rexe CMD build . --no-build-vignettes --no-manual
+          $tar = (Get-ChildItem -Filter '*.tar.gz' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+          Pop-Location
+          if (-not $tar) { throw "Package tarball not found after build" }
+          $env:R_LIBS = $libR
+          $env:R_LIBS_USER = $libR
+          & $Rexe CMD INSTALL --library="$lib" $tar
+
+      # Stage golem app sources (as expected by your main.js)
+      - name: Stage app sources into electron/app
+        shell: pwsh
+        run: |
+          $app = "${{ env.PACKAGE_DIR }}"
+          Push-Location $app
+          if (Test-Path app) { Remove-Item -Recurse -Force app }
+          New-Item -ItemType Directory -Force -Path app | Out-Null
+          Pop-Location
+          Copy-Item -Recurse -Force "$env:PKG_SRC\R"        "$app\app\R"
+          Copy-Item -Force          "$env:PKG_SRC\app.R"    "$app\app\app.R"
+          Copy-Item -Force          "$env:PKG_SRC\DESCRIPTION" "$app\app\DESCRIPTION"
+
+      - name: Verify required pkgs in bundled lib
+        shell: pwsh
+        run: |
+          $r = Join-Path "${{ env.PACKAGE_DIR }}" "runtime\R.win\bin\Rscript.exe"
+          $libR = (Join-Path "${{ env.PACKAGE_DIR }}" "runtime\R.win\library") -replace '\\','/'
+          & $r -e "lp <- '$libR'; cat('hgu133plus2.db:', 'hgu133plus2.db' %in% rownames(installed.packages(lib.loc=lp)), '\n')"
+
+      - name: Build Windows installer
+        env:
+          CI: "true"
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: npx electron-builder --win --x64 --publish=never
+
+      - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ runner.os }}-artifacts
-          path: electron/release/**/*    # note: path from repo root
+          name: win-dist
+          path: ${{ env.PACKAGE_DIR }}/dist/**
+          if-no-files-found: error
+          retention-days: 14
+          

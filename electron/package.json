@@ -10,53 +10,50 @@
     "url": "https://github.com/raghaviCJanaswamy/MyGolemElectronApp.git"
   },  
   "license": "MIT",
+  "main": "main.js",
   "scripts": {
-    "dev": "electron .",
-    "build": "electron-builder --win nsis",
-    "dist:win": "electron-builder --win nsis"
+    "start": "electron .",
+    "dist": "electron-builder"
   },
   "dependencies": {
-    "cross-spawn": "^7.0.3"
+    "fs-extra": "^11.2.0",
+    "tar": "^6.2.1",
+    "undici": "^6.19.8"
   },
   "devDependencies": {
-    "electron": "^32.0.0",
-    "electron-builder": "24.13.3",
-    "@electron/notarize": "^2.2.0"
+    "electron": "31.7.7",
+    "electron-builder": "24.13.3"
   },
   "build": {
-    "appId": "com.example.idepgolem",
-    "productName": "MyGolemElectronApp",
-    "directories": { "output": "release" },
-
+    "appId": "com.idepGolem",
+    "asar": false,
     "files": [
       "main.js",
+      "renderer/**",
+      "preload/**",
       "package.json",
-      "dist/**"
+      "node_modules/**",
+      "data/**"
     ],
-    "asar": false,
     "extraResources": [
-      { "from": "app", "to": "app" }                              
+      { "from": "resources", "to": "." },
+      { "from": "runtime", "to": "runtime" },
+      { "from": "app", "to": "app" }
     ],
-    "afterPack": "./scripts/after-pack-fix-perms.js",
     "win": {
-      "target": [
-        { "target": "nsis", "arch": ["x64"] }
-      ],      
-      "publish": [
-        {
-          "provider": "github"
-        }
-      ],
-      "extraResources": [
-        { "from": "r-runtime", "to": "r-runtime", "filter": ["**/*"]},
-        { "from": "app",       "to": "app" }
-      ]
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "artifactName": "${productName}-${version}-win-${arch}.${ext}"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}"
     },
     "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "artifactName": "${productName}-Setup-${version}.exe"
+      "oneClick": true
     }
   }
 }
