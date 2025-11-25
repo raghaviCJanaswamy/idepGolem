@@ -15,7 +15,7 @@ on:
       - "app.R"
       - "DESCRIPTION"
       - "package.json"
-      - ".github/workflows/build-electron-linux.yml"
+      - ".github/workflows/*.yml"
 
 jobs:
   build:
@@ -33,14 +33,17 @@ jobs:
         id: detect-pkgdir
         run: |
           set -euo pipefail
+
           if [ -f "electron/package.json" ]; then
-            echo "PACKAGE_DIR=electron" >> "$GITHUB_ENV"
+            PACKAGE_DIR="electron"
           elif [ -f "package.json" ]; then
-            echo "PACKAGE_DIR=." >> "$GITHUB_ENV"
+            PACKAGE_DIR="."
           else
             echo "package.json not found at repo root or electron/" >&2
             exit 1
           fi
+
+          echo "PACKAGE_DIR=$PACKAGE_DIR" >> "$GITHUB_ENV"
           echo "PACKAGE_DIR = $PACKAGE_DIR"
 
       # Find the idepGolem R package source by DESCRIPTION
@@ -112,6 +115,29 @@ jobs:
         with:
           r-version: '4.4.1'
 
+      - name: Install system libraries for R packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            libxml2-dev \
+            libpng-dev \
+            libjpeg-dev \
+            libcairo2-dev \
+            libxt-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libtiff5-dev \
+            libharfbuzz-dev \
+            libfribidi-dev \
+            libglib2.0-dev \
+            libudunits2-dev \
+            libgdal-dev \
+            libgeos-dev \
+            libproj-dev
+
       # Stage a full R runtime into runtime/R.linux
       - name: Stage R.linux (mirror R.home into runtime/R.linux)
         run: |
@@ -159,10 +185,12 @@ jobs:
             if (!requireNamespace('remotes', quietly = TRUE)) {
               install.packages('remotes', lib = lib, repos = repos)
             }
+            options(Ncpus = max(1L, parallel::detectCores() - 1L))
             remotes::install_github('espors/ottoPlots',
                                     lib          = lib,
                                     dependencies = TRUE,
-                                    upgrade      = 'never')
+                                    upgrade      = 'never',
+                                    quiet        = TRUE)
             cat('Installed ottoPlots into:', lib, '\n')
           "
 
@@ -173,48 +201,112 @@ jobs:
           lib="$app/runtime/R.linux/library"
           rscript="$app/runtime/R.linux/bin/Rscript"
           desc="$PKG_SRC/DESCRIPTION"
-          libR="$lib"
-          descR="$desc"
+
+          libR="${lib//\\//}"
+          descR="${desc//\\//}"
 
           cat > install_desc.R << 'EOF'
           args <- commandArgs(trailingOnly=TRUE)
-          desc <- args[1]; lib <- args[2]
+          desc <- args[1]
+          lib  <- args[2]
+
           if (!dir.exists(lib)) dir.create(lib, recursive = TRUE, showWarnings = FALSE)
           .libPaths(c(lib, .libPaths()))
-          opt_repos <- c(CRAN='https://cran.r-project.org')
-          options(repos = opt_repos, Ncpus = max(1L, parallel::detectCores()-1L))
-          if (!requireNamespace('BiocManager', quietly=TRUE))
-            install.packages('BiocManager', repos=opt_repos['CRAN'], lib=lib)
-          if (!requireNamespace('remotes', quietly=TRUE))
-            install.packages('remotes',     repos=opt_repos['CRAN'], lib=lib)
+          message("[install_desc] .libPaths() = ", paste(.libPaths(), collapse=" | "))
+
+          opt_repos <- c(CRAN="https://cran.r-project.org")
+          options(
+            repos = opt_repos,
+            Ncpus = max(1L, parallel::detectCores()-1L),
+            warn  = 1
+          )
+
+          message("[install_desc] Using lib: ", lib)
+          message("[install_desc] DESCRIPTION: ", desc)
+
+          if (!requireNamespace("BiocManager", quietly=TRUE))
+            install.packages("BiocManager", repos=opt_repos["CRAN"], lib=lib)
+
+          if (!requireNamespace("remotes", quietly=TRUE))
+            install.packages("remotes", repos=opt_repos["CRAN"], lib=lib)
+
           d <- read.dcf(desc)
-          parse <- function(field) {
+
+          parse_field <- function(field) {
             if (!field %in% colnames(d)) return(character())
-            x <- gsub('\\n', ' ', d[1, field])
-            x <- unlist(strsplit(x, ','))
-            x <- gsub('\\s*\\(.*?\\)\\s*', '', x)
+            x <- gsub("\\n", " ", d[1, field])
+            x <- unlist(strsplit(x, ","))
+            x <- gsub("\\s*\\(.*?\\)\\s*", "", x)
             trimws(x)
           }
-          pkgs <- unique(c(parse('Depends'), parse('Imports')))
-          pkgs <- setdiff(pkgs, c('R','base'))
-          want_ggalt <- 'ggalt' %in% pkgs
-          pkgs <- setdiff(pkgs, 'ggalt')
-          bioc <- intersect(pkgs, c('DESeq2','edgeR','ComplexHeatmap','GSVA','gage',
-                                    'hgu133plus2.db','InteractiveComplexHeatmap',
-                                    'PCAtools','pathview','QUBIC','fgsea'))
-          cran <- setdiff(pkgs, bioc)
-          if (length(cran)) install.packages(cran, lib=lib, dependencies=TRUE)
-          if (length(bioc)) BiocManager::install(bioc, lib=lib, ask=FALSE, update=FALSE)            
-          if (want_ggalt && !('ggalt' %in% rownames(installed.packages(lib.loc=lib)))) {
-            remotes::install_version('ggalt', version='0.4.0',
-                                    lib=lib, upgrade='never', dependencies=TRUE)
+
+          pkgs <- unique(c(parse_field("Depends"), parse_field("Imports")))
+          pkgs <- setdiff(pkgs, c("R","base"))
+
+          message("[install_desc] DESCRIPTION deps: ", paste(pkgs, collapse=", "))
+
+          # Explicit Bioc vs CRAN split
+          bioc_pkgs <- intersect(
+            pkgs,
+            c(
+              "DESeq2","edgeR","ComplexHeatmap","GSVA","gage",
+              "hgu133plus2.db","InteractiveComplexHeatmap","PCAtools",
+              "pathview","QUBIC","fgsea","WGCNA",
+              "GO.db","SummarizedExperiment","Biobase",
+              "limma","KEGGREST","preprocessCore"
+            )
+          )
+          cran_pkgs <- setdiff(pkgs, bioc_pkgs)
+
+          message("[install_desc] CRAN subset: ", paste(cran_pkgs, collapse=", "))
+          message("[install_desc] Bioc subset: ", paste(bioc_pkgs, collapse=", "))
+
+          if (length(cran_pkgs)) {
+            install.packages(cran_pkgs, lib=lib, dependencies=TRUE)
           }
+
+          if (length(bioc_pkgs)) {
+            BiocManager::install(bioc_pkgs, lib=lib, ask=FALSE, update=FALSE)
+          }
+
+          # ggalt is archived; special-case it
+          if (!"ggalt" %in% rownames(installed.packages(lib.loc=lib))) {
+            message("[install_desc] Forcing install of ggalt 0.4.0 from CRAN archive")
+            remotes::install_version(
+              "ggalt", version="0.4.0",
+              lib=lib, upgrade="never", dependencies=TRUE
+            )
+          }
+
           ip <- installed.packages(lib.loc = lib)
-          cat('Installed packages in bundled lib:', nrow(ip), '\n')
-          cat('ggalt present:', 'ggalt' %in% rownames(ip), '\n')
+          message("[install_desc] Installed packages in bundled lib: ", nrow(ip))
+
+          # These are the ones that R CMD INSTALL complains about if missing
+          target <- c(
+            "ComplexHeatmap","DESeq2","gage","ggraph","hgu133plus2.db",
+            "InteractiveComplexHeatmap","pathview","plotly","png",
+            "GSVA","ggalt","WGCNA"
+          )
+
+          check_one <- function(pkg) {
+            present <- pkg %in% rownames(ip)
+            message(sprintf("[install_desc]   %-25s : %s", pkg, if (present) "OK" else "MISSING"))
+            present
+          }
+
+          missing_logical <- !vapply(target, check_one, logical(1))
+          missing <- target[missing_logical]
+
+          if (length(missing)) {
+            stop("Missing required packages for idepGolem after install_desc: ",
+                 paste(missing, collapse=", "))
+          } else {
+            message("[install_desc] All key idepGolem deps present.")
+          }
           EOF
 
           "$rscript" install_desc.R "$descR" "$libR"
+
 
       - name: Build and install idepGolem into R.linux/library
         env:
@@ -224,22 +316,70 @@ jobs:
           TAR: tar
         run: |
           set -euo pipefail
-          app="$PACKAGE_DIR"
-          lib="$app/runtime/R.linux/library"
-          Rexe="$app/runtime/R.linux/bin/R"
-          libR="$lib"
 
+          app="${PACKAGE_DIR}"
+          lib="${app}/runtime/R.linux/library"
+          Rexe="${app}/runtime/R.linux/bin/R"
+          Rscript_bin="${app}/runtime/R.linux/bin/Rscript"
+
+          echo "[build-install] app   = $app"
+          echo "[build-install] lib   = $lib"
+          echo "[build-install] Rexe  = $Rexe"
+          echo "[build-install] Rscript = $Rscript_bin"
+
+          # 1) Build source tarball in PKG_SRC
           pushd "$PKG_SRC"
           "$Rexe" CMD build . --no-build-vignettes --no-manual
-          tarball=$(ls -1t *.tar.gz | head -n1 || true)
+          tarball=$(ls -t *.tar.gz | head -n 1)
           popd
+
           if [ -z "$tarball" ]; then
-            echo "Package tarball not found after build" >&2
+            echo "[build-install] Package tarball not found after build" >&2
             exit 1
           fi
+
+          tarpath="$PKG_SRC/$tarball"
+          echo "[build-install] Built tarball: $tarpath"
+
+          if [ ! -f "$tarpath" ]; then
+            echo "[build-install] Tarball path does not exist: $tarpath" >&2
+            ls -R "$PKG_SRC"
+            exit 1
+          fi
+
+          libR="${lib//\\//}"
           export R_LIBS="$libR"
           export R_LIBS_USER="$libR"
-          "$Rexe" CMD INSTALL --library="$lib" "$PKG_SRC/$tarball"
+
+          # 2) Install the tarball with Rscript + install.packages()
+          "$Rscript_bin" -e "
+            lib <- '$libR'
+            tarball <- '$tarpath'
+
+            .libPaths(c(lib, .libPaths()))
+            cat('[build-install] .libPaths() =', paste(.libPaths(), collapse=' | '), '\n')
+            cat('[build-install] Installing from tarball:', tarball, '\n')
+
+            # Sanity check: are the big deps really installed here?
+            target <- c('ComplexHeatmap','DESeq2','gage','ggraph','hgu133plus2.db',
+                        'InteractiveComplexHeatmap','pathview','plotly','png',
+                        'GSVA','ggalt','WGCNA')
+            ip <- installed.packages(lib.loc = lib)
+            missing <- setdiff(target, rownames(ip))
+            if (length(missing)) {
+              cat('[build-install] WARNING: still missing deps before install:',
+                  paste(missing, collapse=', '), '\n')
+            } else {
+              cat('[build-install] All key deps present before idepGolem install.\n')
+            }
+
+            install.packages(tarball,
+                             repos = NULL,
+                             type  = 'source',
+                             lib   = lib)
+
+            cat('[build-install] idepGolem installed into', lib, '\n')
+          "
 
       - name: Stage app sources into electron/app
         run: |

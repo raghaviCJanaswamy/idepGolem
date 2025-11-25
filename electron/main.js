@@ -111,7 +111,9 @@ function getRuntime() {
   ];
   const R_ROOT = roots.find(fs.existsSync);
   const binDir = R_ROOT ? path.join(R_ROOT, 'bin') : null;
-  const rscript = (binDir && fs.existsSync(path.join(binDir, 'Rscript'))) ? path.join(binDir, 'Rscript') : 'Rscript';
+const rscript = (binDir && fs.existsSync(path.join(binDir, 'Rscript')))
+  ? path.join(binDir, 'Rscript')
+  : 'Rscript';
   return {
     rscript,
     env: R_ROOT ? {

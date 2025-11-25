@@ -33,7 +33,9 @@
       "preload/**",
       "package.json",
       "node_modules/**",
-      "data/**"
+      "data/**",
+      "runtime/**",
+      "app/**" 
     ],
     "extraResources": [
       { "from": "resources", "to": "." },
@@ -49,8 +51,12 @@
       "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
     },
     "linux": {
-      "target": ["AppImage"],
-      "artifactName": "${productName}-${version}-linux-${arch}.${ext}"
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Science",
+      "artifactName": "idep-${version}-linux-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": true

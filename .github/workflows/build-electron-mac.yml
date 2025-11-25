@@ -1,0 +1,286 @@
+name: Build macOS (Electron + R.framework)
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - packaging
+      - 'rel*'
+    tags:
+      - 'v*'
+    paths:
+      - "electron/**"
+      - "R/**"
+      - "app.R"
+      - "DESCRIPTION"
+      - "package.json"
+      - ".github/workflows/*.yml"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect package directory
+        id: detect-pkgdir
+        run: |
+          set -euo pipefail
+
+          if [ -f "electron/package.json" ]; then
+            PACKAGE_DIR="electron"
+          elif [ -f "package.json" ]; then
+            PACKAGE_DIR="."
+          else
+            echo "package.json not found at repo root or electron/" >&2
+            exit 1
+          fi
+
+          # make it available to **future** steps
+          echo "PACKAGE_DIR=$PACKAGE_DIR" >> "$GITHUB_ENV"
+
+          # safe to use in this step
+          echo "PACKAGE_DIR = $PACKAGE_DIR"
+
+      - name: Detect R package source (idepGolem)
+        run: |
+          set -euo pipefail
+          desc_path=$(grep -rl "^Package:[[:space:]]*idepGolem\b" . || true)
+          if [ -z "$desc_path" ]; then
+            echo "idepGolem package source not found" >&2
+            exit 1
+          fi
+          PKG_SRC=$(dirname "$desc_path" | head -n 1)
+          echo "PKG_SRC=$PKG_SRC" >> "$GITHUB_ENV"
+          echo "PKG_SRC = $PKG_SRC"
+
+      - name: Detect package name from DESCRIPTION
+        run: |
+          set -euo pipefail
+          desc="$PKG_SRC/DESCRIPTION"
+          if [ ! -f "$desc" ]; then
+            echo "DESCRIPTION not found at: $desc" >&2
+            exit 1
+          fi
+          PKG_NAME=$(grep "^Package:" "$desc" | head -n1 | awk '{print $2}')
+          if [ -z "$PKG_NAME" ]; then
+            echo "Could not parse Package field in: $desc" >&2
+            exit 1
+          fi
+          echo "PKG_NAME=$PKG_NAME" >> "$GITHUB_ENV"
+          echo "PKG_NAME = $PKG_NAME"
+
+      - name: Fix invalid filename in R/ (leading underscore)
+        run: |
+          set -euo pipefail
+          bad="$PKG_SRC/R/_disable_autoload.R"
+          if [ -f "$bad" ]; then
+            mv "$bad" "$PKG_SRC/R/z_disable_autoload.R"
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ env.PACKAGE_DIR }}/package-lock.json
+
+      - name: Install npm deps
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          set -euxo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci || (rm -rf node_modules && npm install --no-fund --no-audit)
+          else
+            npm install --no-fund --no-audit
+          fi
+
+      - name: Ensure electron-builder present
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          set -euxo pipefail
+          if ! npx --yes --package=electron-builder@26.0.12 --call "echo ok" >/dev/null 2>&1; then
+            npm install -D electron-builder@26.0.12
+          fi
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.4.1'
+
+      # Stage R.framework into runtime/R.framework
+      - name: Stage R.framework (mirror system R.framework into runtime/R.framework)
+        run: |
+          set -euo pipefail
+          RHOME=$(Rscript -e "cat(R.home())")
+          if [ -z "$RHOME" ]; then
+            echo "Could not get R.home()" >&2
+            exit 1
+          fi
+          # RHOME is .../R.framework/Resources
+          FRAMEWORK_DIR=$(dirname "$(dirname "$RHOME")")
+          dst="${PACKAGE_DIR}/runtime/R.framework"
+          mkdir -p "$dst"
+          rsync -a "$FRAMEWORK_DIR"/ "$dst"/
+          echo "RHOME        = $RHOME"
+          echo "FRAMEWORK    = $FRAMEWORK_DIR"
+          echo "Bundled R FW = $dst"
+
+      - name: Resolve bundled paths (debug)
+        run: |
+          set -euo pipefail
+          app="$PACKAGE_DIR"
+          rscript="$app/runtime/R.framework/Resources/bin/Rscript"
+          lib="$app/runtime/R.framework/Resources/library"
+          echo "APP:      $app"
+          echo "Rscript:  $rscript"
+          echo "LIB PATH: $lib"
+          if [ ! -x "$rscript" ]; then
+            echo "Bundled Rscript not found or not executable: $rscript" >&2
+            exit 1
+          fi
+          mkdir -p "$lib"
+
+      - name: Install ottoPlots into bundled R.framework library
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          app="$PACKAGE_DIR"
+          R_BIN="$app/runtime/R.framework/Resources/bin/Rscript"
+          LIB="$app/runtime/R.framework/Resources/library"
+
+          "$R_BIN" -e "
+            lib <- '$LIB'
+            dir.create(lib, showWarnings = FALSE, recursive = TRUE)
+            .libPaths(lib)
+            repos <- c(CRAN = 'https://cran.r-project.org')
+            if (!requireNamespace('remotes', quietly = TRUE)) {
+              install.packages('remotes', lib = lib, repos = repos)
+            }
+            remotes::install_github('espors/ottoPlots',
+                                    lib          = lib,
+                                    dependencies = TRUE,
+                                    upgrade      = 'never',
+                                    quiet       = TRUE)
+            cat('Installed ottoPlots into:', lib, '\n')
+          "
+
+      - name: Install DESCRIPTION deps into bundled library
+        run: |
+          set -euo pipefail
+          app="$PACKAGE_DIR"
+          lib="$app/runtime/R.framework/Resources/library"
+          rscript="$app/runtime/R.framework/Resources/bin/Rscript"
+          desc="$PKG_SRC/DESCRIPTION"
+          libR="$lib"
+          descR="$desc"
+
+          cat > install_desc.R << 'EOF'
+          args <- commandArgs(trailingOnly=TRUE)
+          desc <- args[1]; lib <- args[2]
+          if (!dir.exists(lib)) dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+          .libPaths(c(lib, .libPaths()))
+          opt_repos <- c(CRAN='https://cran.r-project.org')
+          options(repos = opt_repos, Ncpus = max(1L, parallel::detectCores()-1L))
+          if (!requireNamespace('BiocManager', quietly=TRUE))
+            install.packages('BiocManager', repos=opt_repos['CRAN'], lib=lib)
+          if (!requireNamespace('remotes', quietly=TRUE))
+            install.packages('remotes',     repos=opt_repos['CRAN'], lib=lib)
+          d <- read.dcf(desc)
+          parse <- function(field) {
+            if (!field %in% colnames(d)) return(character())
+            x <- gsub('\\n', ' ', d[1, field])
+            x <- unlist(strsplit(x, ','))
+            x <- gsub('\\s*\\(.*?\\)\\s*', '', x)
+            trimws(x)
+          }
+          pkgs <- unique(c(parse('Depends'), parse('Imports')))
+          pkgs <- setdiff(pkgs, c('R','base'))
+          want_ggalt <- 'ggalt' %in% pkgs
+          pkgs <- setdiff(pkgs, 'ggalt')
+          bioc <- intersect(pkgs, c('DESeq2','edgeR','ComplexHeatmap','GSVA','gage',
+                                    'hgu133plus2.db','InteractiveComplexHeatmap',
+                                    'PCAtools','pathview','QUBIC','fgsea'))
+          cran <- setdiff(pkgs, bioc)
+          if (length(cran)) install.packages(cran, lib=lib, dependencies=TRUE)
+          if (length(bioc)) BiocManager::install(bioc, lib=lib, ask=FALSE, update=FALSE)            
+          if (want_ggalt && !('ggalt' %in% rownames(installed.packages(lib.loc=lib)))) {
+            remotes::install_version('ggalt', version='0.4.0',
+                                    lib=lib, upgrade='never', dependencies=TRUE)
+          }
+          ip <- installed.packages(lib.loc = lib)
+          cat('Installed packages in bundled lib:', nrow(ip), '\n')
+          cat('ggalt present:', 'ggalt' %in% rownames(ip), '\n')
+          EOF
+
+          "$rscript" install_desc.R "$descR" "$libR"
+
+      - name: Build and install idepGolem into R.framework/Resources/library
+        env:
+          _R_CHECK_FORCE_SUGGESTS_: "false"
+          R_BUILD_DONTFAIL_ON_WARNING_: "true"
+          R_BUILD_TAR: tar
+          TAR: tar
+        run: |
+          set -euo pipefail
+          app="$PACKAGE_DIR"
+          lib="$app/runtime/R.framework/Resources/library"
+          Rexe="$app/runtime/R.framework/Resources/bin/R"
+          libR="$lib"
+
+          pushd "$PKG_SRC"
+          "$Rexe" CMD build . --no-build-vignettes --no-manual
+          tarball=$(ls -1t *.tar.gz | head -n1 || true)
+          popd
+          if [ -z "$tarball" ]; then
+            echo "Package tarball not found after build" >&2
+            exit 1
+          fi
+          export R_LIBS="$libR"
+          export R_LIBS_USER="$libR"
+          "$Rexe" CMD INSTALL --library="$lib" "$PKG_SRC/$tarball"
+
+      - name: Stage app sources into electron/app
+        run: |
+          set -euo pipefail
+          app="$PACKAGE_DIR"
+          rm -rf "$app/app"
+          mkdir -p "$app/app"
+          cp -r "$PKG_SRC/R"        "$app/app/R"
+          cp    "$PKG_SRC/app.R"    "$app/app/app.R"
+          cp    "$PKG_SRC/DESCRIPTION" "$app/app/DESCRIPTION"
+
+      - name: Verify required pkgs in bundled lib
+        run: |
+          set -euo pipefail
+          r="$PACKAGE_DIR/runtime/R.framework/Resources/bin/Rscript"
+          libR="$PACKAGE_DIR/runtime/R.framework/Resources/library"
+          "$r" -e "lp <- '$libR'; cat('hgu133plus2.db:', 'hgu133plus2.db' %in% rownames(installed.packages(lib.loc=lp)), '\n')"
+
+      - name: Build (npm run dist)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI: "true"
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          set -euxo pipefail
+          if jq -e '.scripts.dist' package.json >/dev/null 2>&1; then
+            npm run dist
+          else
+            npx electron-builder --mac --x64 --publish=never
+          fi
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-dist
+          path: ${{ env.PACKAGE_DIR }}/dist/**
+          if-no-files-found: error
+          retention-days: 14
