@@ -24,6 +24,17 @@ jobs:
       run:
         shell: bash
 
+    # 🔐 Signing / Notarization creds – set these as GitHub secrets
+    env:
+      # SKIP_NOTARIZE: "true"
+      P12_BASE64: ${{ secrets.P12_BASE64 }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.MAC_APPLE_ID }}
+      APPLE_ID_PASSWORD: ${{ secrets.MAC_APPLE_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.MAC_APPLE_TEAM_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.MAC_APP_SPECIFIC_PASSWORD }}
+      CI: "true" 
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,10 +53,7 @@ jobs:
             exit 1
           fi
 
-          # make it available to **future** steps
           echo "PACKAGE_DIR=$PACKAGE_DIR" >> "$GITHUB_ENV"
-
-          # safe to use in this step
           echo "PACKAGE_DIR = $PACKAGE_DIR"
 
       - name: Detect R package source (idepGolem)
@@ -59,22 +67,6 @@ jobs:
           PKG_SRC=$(dirname "$desc_path" | head -n 1)
           echo "PKG_SRC=$PKG_SRC" >> "$GITHUB_ENV"
           echo "PKG_SRC = $PKG_SRC"
-
-      - name: Detect package name from DESCRIPTION
-        run: |
-          set -euo pipefail
-          desc="$PKG_SRC/DESCRIPTION"
-          if [ ! -f "$desc" ]; then
-            echo "DESCRIPTION not found at: $desc" >&2
-            exit 1
-          fi
-          PKG_NAME=$(grep "^Package:" "$desc" | head -n1 | awk '{print $2}')
-          if [ -z "$PKG_NAME" ]; then
-            echo "Could not parse Package field in: $desc" >&2
-            exit 1
-          fi
-          echo "PKG_NAME=$PKG_NAME" >> "$GITHUB_ENV"
-          echo "PKG_NAME = $PKG_NAME"
 
       - name: Fix invalid filename in R/ (leading underscore)
         run: |
@@ -114,8 +106,8 @@ jobs:
         with:
           r-version: '4.4.1'
 
-      # Stage R.framework into runtime/R.framework
-      - name: Stage R.framework (mirror system R.framework into runtime/R.framework)
+      # Mirror R.home() into runtime/R.framework/Resources
+      - name: Stage R.framework (mirror R.home() into runtime/R.framework/Resources)
         run: |
           set -euo pipefail
           RHOME=$(Rscript -e "cat(R.home())")
@@ -123,14 +115,20 @@ jobs:
             echo "Could not get R.home()" >&2
             exit 1
           fi
-          # RHOME is .../R.framework/Resources
-          FRAMEWORK_DIR=$(dirname "$(dirname "$RHOME")")
-          dst="${PACKAGE_DIR}/runtime/R.framework"
+
+          dst_root="${PACKAGE_DIR}/runtime/R.framework"
+          dst="${dst_root}/Resources"
+
           mkdir -p "$dst"
-          rsync -a "$FRAMEWORK_DIR"/ "$dst"/
-          echo "RHOME        = $RHOME"
-          echo "FRAMEWORK    = $FRAMEWORK_DIR"
-          echo "Bundled R FW = $dst"
+          rsync -a "${RHOME}/" "${dst}/"
+
+          echo "RHOME         = $RHOME"
+          echo "Bundled ROOT  = $dst_root"
+          echo "Bundled RHOME = $dst"
+
+          if [ -f "${dst}/bin/Rscript" ]; then
+            chmod +x "${dst}/bin/Rscript"
+          fi
 
       - name: Resolve bundled paths (debug)
         run: |
@@ -143,9 +141,90 @@ jobs:
           echo "LIB PATH: $lib"
           if [ ! -x "$rscript" ]; then
             echo "Bundled Rscript not found or not executable: $rscript" >&2
+            ls -R "$app/runtime" || true
             exit 1
           fi
           mkdir -p "$lib"
+
+      - name: Decode p12 and show hash
+        run: |
+          set -euxo pipefail
+          echo "$P12_BASE64" | base64 --decode > developer-id.p12
+          ls -l developer-id.p12
+          echo "CI p12 SHA256:"
+          shasum -a 256 developer-id.p12
+        shell: bash
+
+      # - name: Import Developer ID certificate
+      #   run: |
+      #     set -euxo pipefail
+      #     KEYCHAIN="build.keychain"
+      #     KEYCHAIN_PWD="temp-keychain-password"
+
+      #     security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+      #     security set-keychain-settings -lut 21600 "$KEYCHAIN"
+      #     security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+
+      #     # This should behave exactly like your local test now
+      #     security import developer-id.p12 \
+      #       -k "$KEYCHAIN" \
+      #       -P "$CSC_KEY_PASSWORD" \
+      #       -T /usr/bin/codesign
+
+      #     security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/[" ]//g')
+      #   shell: bash
+
+      - name: Import code signing certificates
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.P12_BASE64 }}
+          p12-password: ${{ secrets.CSC_KEY_PASSWORD }}
+
+
+      - name: Detect package name from DESCRIPTION
+        run: |
+          set -euo pipefail
+          desc="$PKG_SRC/DESCRIPTION"
+          if [ ! -f "$desc" ]; then
+            echo "DESCRIPTION not found at: $desc" >&2
+            exit 1
+          fi
+          PKG_NAME=$(grep "^Package:" "$desc" | head -n1 | awk '{print $2}')
+          if [ -z "$PKG_NAME" ]; then
+            echo "Could not parse Package field in: $desc" >&2
+            exit 1
+          fi
+          echo "PKG_NAME=$PKG_NAME" >> "$GITHUB_ENV"
+          echo "PKG_NAME = $PKG_NAME"        
+          
+      # Patch DESCRIPTION in CI only: drop ggalt from Imports so it's not a hard dep
+      - name: Patch DESCRIPTION for app build (drop ggalt from Imports)
+        run: |
+          set -euo pipefail
+          desc="$PKG_SRC/DESCRIPTION"
+          echo "[patch-desc] Patching DESCRIPTION at: $desc"
+
+          Rscript -e "
+            desc_path <- '$desc'
+            d <- read.dcf(desc_path)
+
+            if (!'Imports' %in% colnames(d)) {
+              stop('No Imports field in DESCRIPTION')
+            }
+
+            im <- strsplit(d[1, 'Imports'], ',')[[1]]
+            im <- trimws(im)
+            im <- im[im != 'ggalt']
+
+            if (length(im)) {
+              d[1, 'Imports'] <- paste(im, collapse = ',\n    ')
+            } else {
+              d[1, 'Imports'] <- ''
+            }
+
+            write.dcf(d, desc_path)
+            cat('[patch-desc] New Imports:\\n', d[1, 'Imports'], '\\n')
+          "          
 
       - name: Install ottoPlots into bundled R.framework library
         env:
@@ -164,11 +243,12 @@ jobs:
             if (!requireNamespace('remotes', quietly = TRUE)) {
               install.packages('remotes', lib = lib, repos = repos)
             }
+            options(Ncpus = max(1L, parallel::detectCores() - 1L))
             remotes::install_github('espors/ottoPlots',
                                     lib          = lib,
                                     dependencies = TRUE,
                                     upgrade      = 'never',
-                                    quiet       = TRUE)
+                                    quiet        = TRUE)
             cat('Installed ottoPlots into:', lib, '\n')
           "
 
@@ -179,45 +259,120 @@ jobs:
           lib="$app/runtime/R.framework/Resources/library"
           rscript="$app/runtime/R.framework/Resources/bin/Rscript"
           desc="$PKG_SRC/DESCRIPTION"
-          libR="$lib"
-          descR="$desc"
+
+          libR="${lib//\\//}"
+          descR="${desc//\\//}"
 
           cat > install_desc.R << 'EOF'
           args <- commandArgs(trailingOnly=TRUE)
-          desc <- args[1]; lib <- args[2]
+          desc <- args[1]
+          lib  <- args[2]
+
           if (!dir.exists(lib)) dir.create(lib, recursive = TRUE, showWarnings = FALSE)
           .libPaths(c(lib, .libPaths()))
-          opt_repos <- c(CRAN='https://cran.r-project.org')
-          options(repos = opt_repos, Ncpus = max(1L, parallel::detectCores()-1L))
-          if (!requireNamespace('BiocManager', quietly=TRUE))
-            install.packages('BiocManager', repos=opt_repos['CRAN'], lib=lib)
-          if (!requireNamespace('remotes', quietly=TRUE))
-            install.packages('remotes',     repos=opt_repos['CRAN'], lib=lib)
+          message("[install_desc] .libPaths() = ", paste(.libPaths(), collapse=" | "))
+          message("[install_desc] Using lib: ", lib)
+          message("[install_desc] DESCRIPTION: ", desc)
+
+          opt_repos <- c(CRAN="https://cran.r-project.org")
+          options(
+            repos = opt_repos,
+            Ncpus = max(1L, parallel::detectCores()-1L),
+            warn  = 1
+          )
+
+          if (!requireNamespace("BiocManager", quietly=TRUE))
+            install.packages("BiocManager", repos=opt_repos["CRAN"], lib=lib)
+
+          if (!requireNamespace("remotes", quietly=TRUE))
+            install.packages("remotes", repos=opt_repos["CRAN"], lib=lib)
+
           d <- read.dcf(desc)
-          parse <- function(field) {
+
+          parse_field <- function(field) {
             if (!field %in% colnames(d)) return(character())
-            x <- gsub('\\n', ' ', d[1, field])
-            x <- unlist(strsplit(x, ','))
-            x <- gsub('\\s*\\(.*?\\)\\s*', '', x)
+            x <- gsub("\\n", " ", d[1, field])
+            x <- unlist(strsplit(x, ","))
+            x <- gsub("\\s*\\(.*?\\)\\s*", "", x)
             trimws(x)
           }
-          pkgs <- unique(c(parse('Depends'), parse('Imports')))
-          pkgs <- setdiff(pkgs, c('R','base'))
-          want_ggalt <- 'ggalt' %in% pkgs
-          pkgs <- setdiff(pkgs, 'ggalt')
-          bioc <- intersect(pkgs, c('DESeq2','edgeR','ComplexHeatmap','GSVA','gage',
-                                    'hgu133plus2.db','InteractiveComplexHeatmap',
-                                    'PCAtools','pathview','QUBIC','fgsea'))
-          cran <- setdiff(pkgs, bioc)
-          if (length(cran)) install.packages(cran, lib=lib, dependencies=TRUE)
-          if (length(bioc)) BiocManager::install(bioc, lib=lib, ask=FALSE, update=FALSE)            
-          if (want_ggalt && !('ggalt' %in% rownames(installed.packages(lib.loc=lib)))) {
-            remotes::install_version('ggalt', version='0.4.0',
-                                    lib=lib, upgrade='never', dependencies=TRUE)
+
+          pkgs <- unique(c(parse_field("Depends"), parse_field("Imports")))
+          pkgs <- setdiff(pkgs, c("R","base"))
+
+          message("[install_desc] DESCRIPTION deps: ", paste(pkgs, collapse=", "))
+
+          bioc_pkgs <- intersect(
+            pkgs,
+            c(
+              "DESeq2","edgeR","ComplexHeatmap","GSVA","gage",
+              "hgu133plus2.db","InteractiveComplexHeatmap","PCAtools",
+              "pathview","QUBIC","fgsea","WGCNA",
+              "GO.db","SummarizedExperiment","Biobase",
+              "limma","KEGGREST","preprocessCore"
+            )
+          )
+          cran_pkgs <- setdiff(pkgs, bioc_pkgs)
+
+          message("[install_desc] CRAN subset: ", paste(cran_pkgs, collapse=", "))
+          message("[install_desc] Bioc subset: ", paste(bioc_pkgs, collapse=", "))
+
+          if (length(cran_pkgs)) {
+            install.packages(cran_pkgs, lib=lib, dependencies=TRUE)
           }
+
+          if (length(bioc_pkgs)) {
+            BiocManager::install(bioc_pkgs, lib=lib, ask=FALSE, update=FALSE)
+          }
+
+          # ggalt is archived; special-case it and FORCE it (best-effort)
+          if (!"ggalt" %in% rownames(installed.packages(lib.loc=lib))) {
+            message("[install_desc] Trying to install ggalt 0.4.0 from CRAN archive")
+            try(
+            remotes::install_version(
+              "ggalt",
+              version      = "0.4.0",
+              lib          = lib,
+              upgrade      = "never",
+              dependencies = TRUE
+              ),
+              silent = TRUE
+            )
+          }
+
           ip <- installed.packages(lib.loc = lib)
-          cat('Installed packages in bundled lib:', nrow(ip), '\n')
-          cat('ggalt present:', 'ggalt' %in% rownames(ip), '\n')
+          message("[install_desc] Installed packages in bundled lib: ", nrow(ip))
+
+          # Hard requirements for mac (ggalt excluded now)
+          target <- c(
+            "ComplexHeatmap","DESeq2","gage","ggraph","hgu133plus2.db",
+            "InteractiveComplexHeatmap","pathview","plotly","png",
+            "GSVA","WGCNA"
+          )
+
+          check_one <- function(pkg) {
+            present <- pkg %in% rownames(ip)
+            message(sprintf("[install_desc]   %-25s : %s",
+                            pkg, if (present) "OK" else "MISSING"))
+            present
+          }
+
+          missing_logical <- !vapply(target, check_one, logical(1))
+          missing <- target[missing_logical]
+
+          # ggalt reported but not enforced
+          if (!"ggalt" %in% rownames(ip)) {
+            message("[install_desc] WARNING: ggalt is missing (optional for app build).")
+          } else {
+            message("[install_desc] ggalt present.")
+          }
+
+          if (length(missing)) {
+            stop("Missing required packages for idepGolem on macOS: ",
+                 paste(missing, collapse=", "))
+          } else {
+            message("[install_desc] All key idepGolem deps present.")
+          }
           EOF
 
           "$rscript" install_desc.R "$descR" "$libR"
@@ -264,18 +419,33 @@ jobs:
           libR="$PACKAGE_DIR/runtime/R.framework/Resources/library"
           "$r" -e "lp <- '$libR'; cat('hgu133plus2.db:', 'hgu133plus2.db' %in% rownames(installed.packages(lib.loc=lp)), '\n')"
 
+      - name: Show current file descriptor limits
+        run: |
+          set -euxo pipefail
+          ulimit -n
+          sysctl kern.maxfiles
+          sysctl kern.maxfilesperproc
+
+      - name: Raise macOS file descriptor limits
+        run: |
+          set -euxo pipefail
+          # Raise system-wide and per-process file descriptor limits
+          sudo sysctl -w kern.maxfiles=65536
+          sudo sysctl -w kern.maxfilesperproc=65536
+
+          # Now raise the per-shell limit for this build step
+          ulimit -n 65536 || ulimit -n 16384 || ulimit -n 8192
+
+
       - name: Build (npm run dist)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CI: "true"
         working-directory: ${{ env.PACKAGE_DIR }}
         run: |
           set -euxo pipefail
-          if jq -e '.scripts.dist' package.json >/dev/null 2>&1; then
-            npm run dist
-          else
-            npx electron-builder --mac --x64 --publish=never
-          fi
+          # still keep this, but it should now succeed at 65536
+          ulimit -n 65536 || ulimit -n 16384 || ulimit -n 8192
+          npm run dist
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4

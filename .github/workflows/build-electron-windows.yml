@@ -15,7 +15,6 @@ on:
       - "DESCRIPTION"
       - "package.json"
       - ".github/workflows/build-electron-windows.yml"
-
 jobs:
   build:
     runs-on: windows-latest
