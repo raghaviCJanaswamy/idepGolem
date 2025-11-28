@@ -436,6 +436,22 @@ jobs:
           # Now raise the per-shell limit for this build step
           ulimit -n 65536 || ulimit -n 16384 || ulimit -n 8192
 
+      - name: Prune R library (docs, examples, tests)
+        run: |
+          set -euxo pipefail
+          R_LIB="$PACKAGE_DIR/runtime/R.framework/Resources/library"
+
+          # Remove help/docs/examples/tests/vignettes etc.
+          find "$R_LIB" -type d \( \
+            -name help -o -name doc -o -name docs -o \
+            -name html -o -name examples -o -name demo -o \
+            -name tests -o -name testthat -o -name unitTests -o \
+            -name vignettes \
+          \) -prune -exec rm -rf {} +
+
+          # Optionally strip native libs to shrink them
+          find "$R_LIB" \( -name "*.so" -o -name "*.dylib" \) -exec strip -x {} \; || true
+
 
       - name: Build (npm run dist)
         env:
@@ -446,6 +462,24 @@ jobs:
           # still keep this, but it should now succeed at 65536
           ulimit -n 65536 || ulimit -n 16384 || ulimit -n 8192
           npm run dist
+
+      # - name: Notarize DMG (only on tags v*)
+      #   working-directory: ${{ env.PACKAGE_DIR }}
+      #   run: |
+      #     set -euxo pipefail
+
+      #     DMG_PATH=$(ls dist/*.dmg | head -n1)
+
+      #     echo "Submitting $DMG_PATH for notarization..."
+      #     xcrun notarytool submit "$DMG_PATH" \
+      #       --apple-id "$APPLE_ID" \
+      #       --team-id "$APPLE_TEAM_ID" \
+      #       --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+      #       --wait
+
+      #     echo "Stapling ticket..."
+      #     xcrun stapler staple "$DMG_PATH"
+      #     xcrun stapler validate "$DMG_PATH"
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
